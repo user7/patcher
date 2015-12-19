@@ -1,0 +1,3 @@
+use Patcher;
+
+Patcher::modify_context("settings good_load" => 1);

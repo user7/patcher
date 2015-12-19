@@ -1,0 +1,90 @@
+#!/bin/perl
+
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use Patcher qw/ modify_context load_config /;
+use Getopt::Long;
+use File::Copy;
+
+my $input = "j/input.exe";
+my @output;
+my @renames;
+my $digest;
+my $example;
+my $build;
+GetOptions(
+    "i|input=s"          => \$input,
+    "o|output=s"         => \@output,
+    "r|renames=s"        => \@renames,
+    "d|digest=s"         => \$digest,
+    "x|config-example=s" => \$example,
+    "b|build-example=s"  => \$build,
+);
+
+if (defined $input) {
+    die "no such file $input"
+        unless -f $input;
+    modify_context(input_file => $input);
+}
+
+my $o;
+if (@output) {
+    $o = shift @output;
+    modify_context(output_file => $o);
+}
+
+modify_context(config_example => $example)
+    if defined $example;
+
+load_config(@ARGV);
+
+Patcher::apply_and_save();
+print "space left: $Patcher::ctx->{pspace_len}\n";
+
+if (defined $o) {
+    for my $copy (@output) {
+        print "copy $o $copy\n";
+        copy($o, $copy);
+    }
+}
+
+if (defined $digest) {
+    modify_context(
+        "settings truncate_long_dumps"      => 100,
+        "settings off_name_enclosing_scope" => 1,
+    );
+    Patcher::print_patches($digest);
+}
+
+use File::Slurp;
+write_file($example, $Patcher::ctx->{cpatch}{conf_example})
+    if $example and $Patcher::ctx->{cpatch}{conf_example};
+
+write_file($build, $Patcher::ctx->{cpatch}{conf_build})
+    if $build and $Patcher::ctx->{cpatch}{conf_build};
+
+if (@renames) {
+    my $r = shift @renames;
+    open my $fh, ">", $r
+        or die "unable to open $r: $!";
+
+    my %adjust = (
+        ".text" => -546452,
+        ".data" => -517780,
+    );
+    my $offs = $Patcher::ctx->{symbol_offset};
+    for my $sym (sort { $offs->{$a} <=> $offs->{$b} } keys $offs) {
+        my $sec = $Patcher::ctx->{symbol_section}{$sym};
+        my $off = $offs->{$sym} + $adjust{$sec};
+        printf $fh "MakeName(0x%x, '%s_%x');\n", $off, $sym, $off
+            if $sec and $off > 0;
+    }
+    print $fh "SaveBase(\"\");\n";
+    print $fh "Exit(0);\n";
+    close $fh;
+
+    for my $rcopy (@renames) {
+        print "cp $r $rcopy\n";
+        copy($r, $rcopy);
+    }
+}
