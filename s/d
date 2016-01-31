@@ -1,0 +1,38 @@
+#!/usr/bin/perl
+
+# Prints disassembly of a chunk. The chunk can be in any form supported by
+# Patcher.pm, e.g. hex dump or GNU as:
+#
+# s/d <<<"#gas# mov eax, edx"
+#   0:   89 d0                   mov    eax,edx
+#
+# s/d <<<"89 d0"
+#   0:   89 d0                   mov    eax,edx
+
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use Patcher qw/ load_config modify_context patch /;
+
+modify_context("settings truncate_long_dumps"      => undef);
+modify_context("settings off_name_enclosing_scope" => 1);
+modify_context("settings need_listing" => 1);
+modify_context("settings need_objdump" => 1);
+
+my $p = join("\n", (<>));
+if ($p !~ /^#/) {
+    $p =~ s/\s//sg;
+    die "non-hex symbol in hex patch"
+        if $p =~ /[^0-9a-f].*/si;
+    die "odd number of characters in hex patch"
+        if length($p) % 2 == 1;
+    my @bytes = ($p =~ /../g);
+    $p = join(", 0x", @bytes);
+    $p = "#gas# .byte 0x$p";
+}
+
+my $c = Patcher::build_chunk($p);
+my @l = grep { /^\s*[0-9a-f]+:/ } split(/\n/, $c->{listing});
+for my $l (@l) {
+    print "$l\n";
+    # TODO: resolve calls
+}
