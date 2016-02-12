@@ -994,7 +994,7 @@ sub _objdump {
         if $ctx->{settings}{need_objdump};
 
     if ($ctx->{settings}{need_listing}) {
-        IPC::Run::run [ qw/ objdump -dr -Mintel /, $objf ], ">", \$out,
+        IPC::Run::run [ qw/ objdump -dr --insn-width=8 -Mintel /, $objf ], ">", \$out,
             "2>", \$err
             or croak "objdump error: $err";
         $res->{listing} = $out;
