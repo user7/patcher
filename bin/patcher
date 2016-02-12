@@ -12,6 +12,15 @@ my @renames;
 my $digest;
 my $example;
 my $build;
+
+sub set_context {
+    my ($opt, $set) = @_;
+    my ($k, $v, @rest) = split(/=/, $set);
+    die "you must specify key=value for --set-context"
+        if not defined $v or @rest;
+    modify_context($k => $v);
+}
+
 GetOptions(
     "i|input=s"          => \$input,
     "o|output=s"         => \@output,
@@ -19,7 +28,8 @@ GetOptions(
     "d|digest=s"         => \$digest,
     "x|config-example=s" => \$example,
     "b|build-example=s"  => \$build,
-);
+    "set-context=s"      => \&set_context,
+) or die "bad commad line arguments";
 
 if (defined $input) {
     die "no such file $input"
