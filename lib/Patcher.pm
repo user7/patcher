@@ -210,13 +210,12 @@ sub find_symbol {
             unless defined $ctx->{symbol_section}{$sym}
             and $ctx->{symbol_section}{$sym} eq $sec;
 
+        my $ignore = $ctx->{settings}{find_offset}{ignore};
+        next
+            if ref($ignore) eq "Regexp" and $sym =~ $ignore;
+
         my $sym_off = $ctx->{symbol_offset}{$sym};
         next if $ctx->{symbol_offset}{$sym} > $off;
-
-        next
-            if $sym_off == $off
-            and $ctx->{settings}{off_name_enclosing_scope}
-            and $sym !~ /^proc_/;
 
         next
             if defined $nearest_sym and $nearest_sym_off > $sym_off;
