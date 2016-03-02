@@ -1184,6 +1184,18 @@ sub _parse_objdump {
 }
 
 
+sub _chunk_requires_linking {
+    my $ch = shift;
+    for (qw/ link_rel link_abs link_self /) {
+        return 1
+            if defined $ch->{$_}
+            and ref($ch->{$_}) eq "HASH"
+            and %{ $ch->{$_} };
+    }
+    return 0;
+}
+
+
 sub _objdump {
     my ($objf, $opts) = @_;
     $opts //= {};
