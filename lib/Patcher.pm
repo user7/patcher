@@ -452,6 +452,14 @@ sub _patch {
             if $d > 0;
     }
 
+    if (    defined $p->{pchunk}
+        and defined $p->{cchunk}
+        and $ctx->{settings}{require_check_match_patch})
+    {
+        croak "pchunk is smaller than cchunk (forgot fill_nop?)"
+            if length($p->{pchunk}{bytes}) < length($p->{cchunk}{bytes});
+    }
+
     # TODO whole 'topic' thing is messy and needs refactoring,
     # make them independent, make them store docs
     if (defined $p->{topic}) {
