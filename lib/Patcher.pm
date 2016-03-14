@@ -439,7 +439,9 @@ sub _patch {
     }
 
     if (defined $p->{pchunk} and defined $p->{cchunk}) {
-        croak "cchunk ends before pchunk (pchunk is not covered)"
+        croak "cchunk ends before pchunk (pchunk is not covered, "
+            . length($p->{pchunk}{bytes}) . " > "
+            . length($p->{cchunk}{bytes}) . ")"
             if length($p->{cchunk}{bytes}) < length($p->{pchunk}{bytes});
     }
 
