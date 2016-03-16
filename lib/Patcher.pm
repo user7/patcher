@@ -252,13 +252,13 @@ sub topic {
 
 
 sub patch_divert {
-    my ($where, $from, $to) = @_;
-
+    my ($where, $from, $to, $op) = @_;
+    $op //= "call";
     patch(
         off    => $where,
         desc   => "divert $from -> $to",
         cchunk => "#gas# call $from",
-        pchunk => "#gas# call $to",
+        pchunk => "#gas# $op $to",
     );
 }
 
