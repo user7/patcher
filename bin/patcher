@@ -11,10 +11,10 @@ use Carp qw/ verbose croak /;
 my $input = "j/input.exe";
 my @output;
 my @renames;
-my $digest;
-my $example;
-my $build;
-my $bin;
+my @digest;
+my @example;
+my @build;
+my @bin;
 
 
 sub set_context {
@@ -29,10 +29,10 @@ GetOptions(
     "i|input=s"          => \$input,
     "o|output=s"         => \@output,
     "r|renames=s"        => \@renames,
-    "d|digest=s"         => \$digest,
-    "x|config-example=s" => \$example,
-    "b|build-example=s"  => \$build,
-    "n|bin=s"            => \$bin,
+    "d|digest=s"         => \@digest,
+    "x|config-example=s" => \@example,
+    "b|build-example=s"  => \@build,
+    "n|bin=s"            => \@bin,
     "set-context=s"      => \&set_context,
 ) or die "bad commad line arguments";
 
@@ -48,8 +48,8 @@ if (@output) {
     modify_context("source_output_file exe" => $o);
 }
 
-modify_context(config_example => $example)
-    if defined $example;
+modify_context(config_example => $example[0])
+    if @example;
 
 load_config(@ARGV);
 
@@ -62,7 +62,16 @@ sub write_file_aux {
     print "written $f\n";
 }
 
-if (defined $bin) {
+
+sub copy_all {
+    my ($f, @to) = @_;
+    for my $t (@to) {
+        print "copy $f $t\n";
+        copy($f, $t);
+    }
+}
+
+if (@bin) {
     my $desc = $Patcher::ctx->{bin_desc_bytes} // "";
     my $relocs = $Patcher::ctx->{reloc_chunk_bytes};
     croak "reloc chunk does not exist"
@@ -70,7 +79,7 @@ if (defined $bin) {
 
     my $code = $Patcher::ctx->{source_bytes}{bin};
     croak "no bin code is built"
-        unless defined $bin;
+        unless defined $code;
 
     my $header = pack(
         "VVV",
@@ -78,61 +87,53 @@ if (defined $bin) {
         length($desc),
         length($desc) + length($relocs),
     );
-    write_file_aux($bin, $header . $desc . $relocs . $code);
+    my $data = $header . $desc . $relocs . $code;
+    write_file_aux($bin[0], $data);
+    copy_all(@bin);
 }
 
-if (defined $o) {
-    for my $copy (@output) {
-        print "copy $o $copy\n";
-        copy($o, $copy);
-    }
-}
+copy_all($o, @output);
 
-if (defined $digest) {
+if (@digest) {
     modify_context(
         "settings truncate_long_dumps"      => 100,
         "settings off_name_enclosing_scope" => 1,
     );
-    Patcher::print_patches($digest);
+    Patcher::print_patches($digest[0]);
+    copy_all(@digest);
 }
 
 
 sub put_generated_file {
-    my ($f, $desc, $item) = @_;
-    return unless defined $f;
+    my ($desc, $item, @files) = @_;
+    return unless @files;
     my $r = Patcher::context_get(qw/ conf_gen generated /, $item);
     croak "no conf_gen generated $item in patcher context"
         unless defined $r;
-    write_file_aux($f, $r);
+    write_file_aux($files[0], $r);
+    copy_all(@files);
 }
 
-put_generated_file($example, "config example",     "config_example");
-put_generated_file($build,   "build list example", "build_example");
+put_generated_file("config example",     "config_example", @example);
+put_generated_file("build list example", "build_example",  @build);
 
+# TODO: redo in IDC
 if (@renames) {
-    my $r = shift @renames;
-    open my $fh, ">", $r
-        or die "unable to open $r: $!";
-
+    my $out    = "";
     my %adjust = (
         ".text" => $Patcher::ctx->{section_base}{".text"},
         ".data" => $Patcher::ctx->{section_base}{".data"},
     );
-
     my $offs = $Patcher::ctx->{symbol_offset};
     for my $sym (sort { $offs->{$a} <=> $offs->{$b} } keys %$offs) {
         my $sec = $Patcher::ctx->{symbol_section}{$sym};
         next unless exists $adjust{$sec};
         my $off = $offs->{$sym} + $adjust{$sec};
-        printf $fh "MakeName(0x%x, '%s_%x');\n", $off, $sym, $off
+        $out .= sprintf "MakeName(0x%x, '%s_%x');\n", $off, $sym, $off
             if $sec and $off > 0;
     }
-    print $fh "SaveBase(\"\");\n";
-    print $fh "Exit(0);\n";
-    close $fh;
-
-    for my $rcopy (@renames) {
-        print "cp $r $rcopy\n";
-        copy($r, $rcopy);
-    }
+    $out .= "SaveBase(\"\");\n";
+    $out .= "Exit(0);\n";
+    write_file_aux($renames[0], $out);
+    copy_all(@renames);
 }
