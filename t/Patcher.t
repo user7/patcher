@@ -845,7 +845,8 @@ eval_test(
                     ".text" => $text_off,
                     ".data" => $data_off,
                 },
-                "settings relocator" => "r",
+                "settings relocator"                => "r",
+                "settings mimic_relocated_pointers" => 1,
 
                 # "settings deduce_section" => 1,
                 data_bootstrap_ptr => $text_off + $var_ref_dseg,

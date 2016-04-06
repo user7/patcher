@@ -1019,6 +1019,7 @@ sub _sym_base {
     _die "no section for symbol $sym"
         unless defined $sec;
 
+    return 0 unless $ctx->{settings}{mimic_relocated_pointers};
     return $ctx->{section_base}{$sec} // 0;
 }
 
