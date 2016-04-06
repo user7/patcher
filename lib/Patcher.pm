@@ -180,7 +180,7 @@ sub generate_digest {
         $at //= sprintf("%s %08x", $p->{source}, $p->{off_source})
             if defined $p->{source} and defined $p->{off_source};
         $at //= sprintf("%s %08x", $p->{section}, $p->{off_section})
-            if defined $p->{off_section} and defined $p->{off_section};
+            if defined $p->{section} and defined $p->{off_section};
         $at //= sprintf("??? %08x", $p->{off})
             if defined $p->{off};
         $at //= "";
@@ -191,6 +191,7 @@ sub generate_digest {
         $out .= sprintf "patch %s '%s%s'%s: %s\n", $at, $topic, $p->{desc},
             $sym_name, _hexdump($b) . $add;
     }
+    $out =~ s/\n/\r\n/g;
     return $out;
 }
 
@@ -236,28 +237,32 @@ sub find_symbol {
 
     my ($min, $max, $minv, $maxv) = (0, @$si - 1, $si->[0][0], $si->[-1][0]);
     return "" if $minv > $off;
-    while (1) {
-        my $mid  = int(($max + $min) / 2);
-        my $midv = $si->[$mid][0];
-        my $change;
+    if ($maxv < $off) {
+        $minv = $maxv;
+        $min  = $max;
+    } else {
+        while (1) {
+            my $mid  = int(($max + $min) / 2);
+            my $midv = $si->[$mid][0];
+            my $change;
 
-        $min = $mid, $minv = $midv, $change = 1
-            if $min != $mid and $midv < $off;
+            $min = $mid, $minv = $midv, $change = 1
+                if $min != $mid and $midv < $off;
 
-        $max = $mid, $maxv = $midv, $change = 1
-            if $max != $mid and $midv >= $off;
+            $max = $mid, $maxv = $midv, $change = 1
+                if $max != $mid and $midv >= $off;
 
-        last unless $change;
+            last unless $change;
+        }
     }
 
-    if ($maxv == $off and $ctx->{settings}{off_name_skip_zero_offsets}) {
-        --$max;
-        return "" if $max < 0;
-        $maxv = $si->[$max][0];
+    if ($maxv == $off and not $ctx->{settings}{off_name_skip_zero_offsets}) {
+        $minv = $maxv;
+        $min  = $max;
     }
-    my $d    = $off - $maxv;
-    my $maxd = $ctx->{settings}{off_name_max_dist};
-    return "" if defined $maxd and $d > $maxd;
+    my $d        = $off - $minv;
+    my $max_dist = $ctx->{settings}{off_name_max_dist};
+    return "" if defined $max_dist and $d > $max_dist;
     return "$si->[$min][1]+$d";
 }
 
@@ -309,19 +314,36 @@ sub patch_divert_all {
     _die "symbol section does not match $sec"
         unless $ctx->{symbol_section}{$old_target} eq $sec;
 
-    my $maxi = 2**32;
-    my $off  = $soff;
-    my $end  = $soff + $slen;
-    while ($off + 5 <= $end) {
-        my ($op, $addr) =
-            unpack("CV", substr($$bytes, $off, 5));
+    my $index = $ctx->{call_index} // {};
+    unless ($index->{$sec}) {
+        my $si = $index->{$sec} = {};
+        my $off = $soff;
+        my $end = $soff + $slen;
+        while ($off + 5 <= $end) {
+            my ($op, $delta) = unpack("CV", substr($$bytes, $off, 5));
+            ++$off, next
+                unless $op == 0xe8;
 
-        ++$off, next
-            unless $op == 0xe8 and ($addr + $off + 5 - $soff) % $maxi == $ot;
-
-        patch_divert($off, $old_target, $new_target);
-        $off += 5;
+            my $t = $off + 5 + $delta;
+            $t -= 2**32 if $delta >= 2**31;
+            ++$off, next
+                if $t < $soff or $t > $end;
+            $t -= $soff;
+            $si->{$t} //= [];
+            push(@{$si->{$t}}, $off);
+            ++$off;
+        }
+        $ctx->{call_index} = $index;
     }
+
+    my $si = $index->{$sec};
+    _die "internal error, failed to build index for $sec" unless $si;
+
+    my $offs = $si->{$ot};
+    _die "no calls to $old_target found in section $sec"
+        unless $offs;
+
+    patch_divert($_, $old_target, $new_target) for @$offs;
 }
 
 
