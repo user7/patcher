@@ -317,9 +317,14 @@ sub patch_divert_all {
     my $index = $ctx->{call_index} // {};
     unless ($index->{$sec}) {
         my $si = $index->{$sec} = {};
-        my $off = $soff;
-        my $end = $soff + $slen;
+        my $off         = $soff;
+        my $end         = $soff + $slen;
+        my $call_opcode = pack("C", 0xe8);
         while ($off + 5 <= $end) {
+            my $i = index($$bytes, $call_opcode, $off);
+            last if $i < 0 or $i + 5 > $end;
+            $off = $i;
+
             my ($op, $delta) = unpack("CV", substr($$bytes, $off, 5));
             ++$off, next
                 unless $op == 0xe8;
