@@ -927,11 +927,8 @@ sub link_patches {
     $ctx->{relocs} //= {};
     for my $p (@{ $ctx->{patches} }) {
         for my $c (qw/ pchunk cchunk /) {
-            _eval_rethrow(
-                sub { _link_chunk($p->{$c}, $p->{section}, $p->{off_section}) },
-                "link $c",
-                $p
-            );
+            _eval_rethrow(sub { _link_chunk($p->{$c}, $p, $c eq "pchunk"); },
+                "link $c", $p);
         }
     }
 
@@ -1034,7 +1031,8 @@ sub _link_chunk_croak {
 
 
 sub _link_chunk {
-    my ($c, $sec, $off) = @_;
+    my ($c, $p, $store_relocs) = @_;
+    my ($sec, $off) = ($p->{section}, $p->{off_section});
 
     if ($c->{link_rel} && %{ $c->{link_rel} }) {
         _link_chunk_croak($sec, $off);
@@ -1047,7 +1045,8 @@ sub _link_chunk {
                 substr($c->{bytes}, $o, 4) = pack("V",
                     $ctx->{symbol_offset}{$sym} + $delta - ($off + $o));
             } else {
-                $ctx->{reloc_rel}{$sec}{ $o + $off } = $ref;
+                $ctx->{reloc_rel}{$sec}{ $o + $off } = $ref
+                    if $store_relocs;
             }
         }
     }
@@ -1059,7 +1058,8 @@ sub _link_chunk {
             my ($sym, $delta) = _split_ref($ref);
             _die "undefined reference $ref"
                 unless exists $ctx->{symbol_offset}{$sym};
-            $ctx->{reloc_abs}{$sec}{ $o + $off } = $ref;
+            $ctx->{reloc_abs}{$sec}{ $o + $off } = $ref
+                if $store_relocs;
             substr($c->{bytes}, $o, 4) = pack("V",
                 $ctx->{symbol_offset}{$sym} + _sym_base($sym) + $delta);
         }
@@ -1071,8 +1071,8 @@ sub _link_chunk {
             my $ref = $c->{link_self}{$o};
             my $var = $off + $ref;
             $var = "+$var" if $var >= 0;
-            $ctx->{reloc_abs}{$sec}{ $o + $off } = $sec . $var;
-
+            $ctx->{reloc_abs}{$sec}{ $o + $off } = $sec . $var
+                if $store_relocs;
             substr($c->{bytes}, $o, 4) =
                 pack("V", $off + _sym_base($sec) + $ref);
         }
