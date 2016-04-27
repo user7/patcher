@@ -145,21 +145,14 @@ sub load_config {
 sub add_symbol {
     _die_args("add_symbol", undef, @_);
     my $s = {@_};
-
-    _eval_rethrow(sub { _add_symbol($s) }, "when adding '$s->{name}'", $s);
+    _eval_rethrow(sub { _add_symbol($s) }, "add_symbol", $s);
 }
 
 
 sub patch {
     _die_args("patch", undef, @_);
     my $p = {@_};
-
-    $p->{desc} //= $ctx->{settings}{default_desc};
-
-    _die "desc is required"
-        unless defined $p->{desc} and ref($p->{desc}) eq "";
-
-    _eval_rethrow(sub { _patch($p) }, "when parsing '$p->{desc}'", $p);
+    _eval_rethrow(sub { _patch($p) }, "patch", $p);
 }
 
 
@@ -533,6 +526,10 @@ sub _check_filter {
 
 sub _patch {
     my $p = shift;
+    $p->{desc} //= $ctx->{settings}{default_desc};
+    _die "desc is required"
+        unless defined $p->{desc} and ref($p->{desc}) eq "";
+
     _update_offsets($p);
 
     # TODO whole 'topic' thing is messy and needs refactoring,
