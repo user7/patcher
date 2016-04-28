@@ -29,6 +29,7 @@ sub common_settings {
         source_output_file    => {},
         symbol_section        => {},
         symbol_offset         => {},
+        alias_symbol          => {},
         patches               => [],
         reloc_rel             => {},
         reloc_abs             => {},

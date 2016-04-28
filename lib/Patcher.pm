@@ -53,6 +53,7 @@ sub reset_context {
         settings              => {},
         symbol_offset         => {},
         symbol_section        => {},
+        alias_symbol          => {},
         section_offset        => {},
         section_length        => {},
         section_base          => {},
@@ -146,6 +147,13 @@ sub add_symbol {
     _die_args("add_symbol", undef, @_);
     my $s = {@_};
     _eval_rethrow(sub { _add_symbol($s) }, "add_symbol", $s);
+}
+
+
+sub add_alias_symbol {
+    _die_args("add_alias_symbol", undef, @_);
+    my $s = {@_};
+    _eval_rethrow(sub { _add_alias_symbol($s) }, "add_alias_symbol", $s);
 }
 
 
@@ -498,17 +506,38 @@ sub _add_symbol {
     _update_offsets($s);
     _die "section was not specified or deduced"
         unless defined $s->{section};
-    _die "off was not specified"
-        unless defined $s->{off};
-    if (exists $ctx->{symbol_offset}{$n}) {
+    _die "off or off_section was not specified"
+        unless defined $s->{off_section};
+    if (defined $ctx->{symbol_offset}{$n}) {
         return
-            if defined $ctx->{symbol_offset}{$n}
-            and $ctx->{symbol_offset}{$n} eq $s->{off};
-        _die
-            "symbol $n is already defined at $ctx->{symbol_offset}{$n} != $s->{off}";
+            if $ctx->{symbol_offset}{$n} eq $s->{off_section}
+            and $ctx->{symbol_section}{$n} eq $s->{section};
+        _die(
+            sprintf "symbol %s is already defined in %s at 0x%x != 0x%x",
+            $n,
+            $ctx->{symbol_section}{$n} // '?',
+            $ctx->{symbol_offset}{$n},
+            $s->{off_section}
+        );
     }
     $ctx->{symbol_offset}{$n}  = $s->{off_section};
     $ctx->{symbol_section}{$n} = $s->{section};
+}
+
+
+sub _add_alias_symbol {
+    my $s = shift;
+    my $n = $s->{name};
+    _die "name is required"
+        unless defined $n;
+    my $r = $s->{ref};
+    _die "ref is required"
+        unless defined $r;
+
+    my $r0 = $ctx->{alias_symbol}{$n};
+    _die "alias '$n' already refers to '$r0' != '$r'"
+        if defined $r0 and $r0 ne $r;
+    $ctx->{alias_symbol}{$n} = $r;
 }
 
 
@@ -660,6 +689,19 @@ sub _add_symbols {
             off     => 0,
             name    => $s,
             section => $s,
+        );
+    }
+
+    for my $a (sort keys %{ $ctx->{alias_symbol} }) {
+        my $ref = $ctx->{alias_symbol}{$a};
+        my ($sym, $delta) = _split_ref($ref);
+        my $soff = $ctx->{symbol_offset}{$sym};
+        _die "alias symbol '$a' refers to non-existent address '$ref'"
+            unless defined $soff;
+        add_symbol(
+            name        => $a,
+            off_section => $soff + $delta,
+            section     => $ctx->{symbol_section}{$sym},
         );
     }
 }
