@@ -79,7 +79,7 @@ sub _die;
 
 
 sub modify_context {
-    _die_args("modify_context", undef, @_);
+    _die_args("modify_context", [@_]);
 
     while (@_) {
         my ($k, $v) = (shift, shift);
@@ -144,21 +144,21 @@ sub load_config {
 
 
 sub add_symbol {
-    _die_args("add_symbol", undef, @_);
+    _die_args("add_symbol", [@_]);
     my $s = {@_};
     _eval_rethrow(sub { _add_symbol($s) }, "add_symbol", $s);
 }
 
 
 sub add_alias_symbol {
-    _die_args("add_alias_symbol", undef, @_);
+    _die_args("add_alias_symbol", [@_]);
     my $s = {@_};
     _eval_rethrow(sub { _add_alias_symbol($s) }, "add_alias_symbol", $s);
 }
 
 
 sub patch {
-    _die_args("patch", undef, @_);
+    _die_args("patch", [@_]);
     my $p = {@_};
     _eval_rethrow(sub { _patch($p) }, "patch", $p);
 }
@@ -1211,11 +1211,16 @@ sub pp {
 
 
 sub _die_args {
-    my ($func, $arg_template, @args) = @_;
+    my ($func, $args) = @_;
     _die "$func requires even number of arguments"
-        if @args % 2 == 1;
+        if @$args % 2 == 1;
 
-    # TODO arg template
+    my %x;
+    for (my $i = 0 ; $i < @$args ; $i += 2) {
+        my $k = $args->[$i];
+        _die "$func: duplicate key $k" if $x{$k};
+        $x{$k} = 1;
+    }
 }
 
 
