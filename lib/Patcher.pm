@@ -1270,7 +1270,8 @@ sub _parse_objdump {
         my @items = split /\s+/, $sline;
         my ($sid, $sname, $ssize, $salign) = @items[ 1, 2, 3, 7 ];
 
-        next unless $sname =~ /^\.(text|rdata|rodata.*|data|bss|slt|comment)$/;
+        next unless $sname
+            =~ /^\.(text(\.unlikely)?|rdata|rodata.*|data|bss|slt|comment)$/;
         next if $sname eq ".comment" and not $opts->{keep_comment};
 
         $salign{$sname} =
@@ -1339,42 +1340,54 @@ sub _parse_objdump {
         $soff{$sname} = $off + $npad;
     }
 
-    # extracting globals
+    # extracting globals (extern) and locals (static)
     my ($symbols) = $out =~ /^SYMBOL TABLE:\n((?:\S.*\n)*)/m;
-    my %globals;
+    my %vars = (global => {}, local => {%soff});
     for my $sl (split /\n/, $symbols) {
-        my ($off, $sname, $sym);
+        my ($linkage, $off, $sname, $sym) = ("global");
         if ($pe) {
-            my ($sid, $scl, $nx);
-            ($sid, $scl, $nx, $off, $sym) =
-                $sl =~
-                /^\[\s*[0-9]+\]\(sec\s+([0-9]+)\)\(fl.*\)\(ty.*\)\(scl\s+(.*)\) \(nx\s+([0-9]+)\)\s+0x([0-9a-f]+)\s+(.*)/;
-            unless (defined $sym) {
-
-                # print "no match $sl\n";
-                next;
-            } else {
-
-                # print "match $sl\n";
-                # print "sid=$sid nx=$nx off=$off sym=$sym soff=$soff{$id_to_sname{$sid}}\n";
-            }
-
-            # next unless $nx == 1;
+            my ($sid, $scl);
+            ($sid, $scl, $off, $sym) =
+                $sl =~ /^\[\s*[0-9]+\]
+                        \(sec\s+(\d+)\)
+                        \(fl.*?\)
+                        \(ty.*?\)
+                        \(scl\s+(\d*)\)
+                        [ ]
+                        \(nx.*?\)
+                        \s+0x([0-9a-f]+)    # off
+                        \s+(.*)             # sym
+                        /x;
+            next unless defined $sym;
             next if defined $soff{$sym};
-            next unless $scl == 2;
+            next unless $scl == 2; # 2 = external symbol, in PE we don't need
+                                   # static symbols, because all local
+                                   # references are section-based
             next unless $sid;
+
+            # on windows gcc prepends all C symbols with _, removing it
+            # so that C patches link properly with asm patches
             $sym =~ s/^_+//g;
+
             $sname = $id_to_sname{ $sid - 1 };
             _die "no section with id $sid"
                 unless $sname;
         } else {
-            ($off, $sname, $sym) =
-                $sl =~ /^([0-9a-f]+) g.{7}(\S+)\s+\S+\s+(.*)/;
+            my $gl;
+            ($off, $gl, $sname, $sym) =
+                $sl =~ /^([0-9a-f]+)( g.{7}| l {7})(\S+)\s+\S+\s+(.*)/;
             next unless defined $sym;
-            _die "unknown section $sname referenced: $symbols "
+            $linkage = "local" if $gl =~ /^ l/;
+            $linkage = "local" if $sym =~ s/^\.hidden //g;
+
+            # filtering out unneeded locals like this:
+            # 00000000 l       *ABS*    00000000 foo
+            next if $linkage eq "local" and not exists $soff{$sname};
+
+            _die "unknown section $sname referenced in symbols"
                 unless exists $soff{$sname};
         }
-        $globals{$sym} = $soff{$sname} + hex($off);
+        $vars{$linkage}{$sym} = $soff{$sname} + hex($off);
     }
 
     # extracting relocations
@@ -1395,32 +1408,37 @@ sub _parse_objdump {
             my ($roff, $rtype, $sym) =
                 (hex($1) + $soff{$sname}, $2, $3);
 
+            # on windows gcc prepends all C symbols with _, removing it
+            # so that C patches link properly with asm patches
             $sym =~ s/^_+//g;
 
-            _die "relocation mentions unknown section $sym: $rline"
-                if $sym =~ /^\./ and not exists $soff{$sym};
+            my $local_off = $vars{local}{$sym};
+            # all symbols starting from . should be either sections or locals
+            _die "relocation mentions unknown symbol $sym: $rline"
+                if $sym =~ /^\./ and not defined $local_off;
 
             if ($rtype =~ /R_386_32|dir32/) {
-                if ($sym =~ /^\./) {
-
-                    # offset from section boundary is embedded into instruction
+                if (defined $local_off) {
                     $link_self{$roff} =
-                        unpack("V", substr($bytes, $roff, 4)) + $soff{$sym};
+                           unpack("V", substr($bytes, $roff, 4)) + $local_off;
                     next;
                 }
-
                 $link_abs{$roff} = $sym . _unpack_delta($bytes, $roff, 0);
                 next;
             }
 
             if ($rtype =~ /R_386_PC32|DISP32/) {
                 my $dfunc = $rtype eq "DISP32" ? -4 : 0;
-                if ($sym =~ /^\./) {
 
-                    # offset from section boundary is embedded into instruction
+                # relative local references are hardcoded, there is no need to
+                # link them dynamically since they are position independent
+                if (defined $local_off) {
+                    # Embedded offset, for ELF it is usually -4 for ordinary
+                    # calls. PE counts relative from reloc+4, so for PE we add
+                    # implicit -4 via $dfunc.
                     my $eo = unpack("V", substr($bytes, $roff, 4)) + $dfunc;
-                    substr($bytes, $roff, 4) =
-                        pack("V", $eo + $soff{$sym} - $roff);
+                    my $relative_target = $local_off + $eo - $roff;
+                    substr($bytes, $roff, 4) = pack("V", $relative_target);
                     next;
                 }
 
@@ -1434,7 +1452,7 @@ sub _parse_objdump {
     my $res = {
         bytes     => $bytes,
         align     => $max_align,
-        globals   => \%globals,
+        globals   => $vars{global},
         link_rel  => \%link_rel,
         link_abs  => \%link_abs,
         link_self => \%link_self,
