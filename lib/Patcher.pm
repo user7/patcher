@@ -1506,7 +1506,7 @@ sub _croak_source {
     my ($where, $code, $out) = @_;
     my $i = 1;
     $code =~ s/^/$i++." "/meg;
-    _die "$where\n$code\nerror was: $out\n";
+    _die "$where\n$code\nerror was:\n   $out\n";
 }
 
 
