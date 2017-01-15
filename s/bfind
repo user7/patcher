@@ -17,6 +17,7 @@ my $data = read_file $exe;
 
 sub hex_to_bin {
     my $h = shift;
+    return substr($h, 1) if $h =~ /^=/;
     $h =~ s/\s//g;
     return pack("H*", $h);
 }
