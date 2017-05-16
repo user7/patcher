@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 
 # Prints disassembly of a chunk. The chunk can be in any form supported by
 # Patcher.pm, e.g. hex dump or GNU as:
