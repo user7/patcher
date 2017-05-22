@@ -1168,9 +1168,14 @@ sub _rebuild {
     return _asciify_string($v)
         if ref($v) eq '';
 
+    my $max_items = $ctx->{settings}{format_max_items};
     if (ref($v) eq 'ARRAY') {
         my @res;
         for my $el (@$v) {
+            if (defined $max_items && $max_items-- <= 0) {
+                push(@res, "...");
+                last;
+            }
             push(@res, _rebuild($el));
         }
         return \@res;
@@ -1178,8 +1183,12 @@ sub _rebuild {
 
     if (ref($v) eq 'HASH') {
         my %res;
-        while (my ($key, $val) = each %$v) {
-            $res{$key} = _rebuild($val);
+        for my $key (sort keys %$v) {
+            if (defined $max_items && $max_items-- <= 0) {
+                $res{"..."} = "...";
+                last;
+            }
+            $res{$key} = _rebuild($v->{$key});
         }
         return \%res;
     }
