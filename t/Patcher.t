@@ -1,96 +1,15 @@
 use warnings;
 use strict;
+no warnings "experimental";
 
-use Test::Most tests => 52;
 use Test::Most;
 use Test::Deep;
 use FindBin;
 use lib "$FindBin::Bin/../lib";
 
 $SIG{PIPE} = 'ignore';    # for watch
-
-use_ok("Patcher");
-
-sub common_settings {
-    return (
-        settings => {
-            need_listing    => 1,
-            honor_alignment => 0,
-            quiet           => 1,
-        },
-        section_offset        => {},
-        section_length        => {},
-        section_base          => {},
-        section_source        => {},
-        section_pspace_offset => {},
-        section_pspace_length => {},
-        source_bytes          => {},
-        source_input_file     => {},
-        source_output_file    => {},
-        symbol_section        => {},
-        symbol_offset         => {},
-        alias_symbol          => {},
-        patches               => [],
-        reloc_rel             => {},
-        reloc_abs             => {},
-        build_cache           => {},
-        build_cache_usage     => {},
-    );
-}
-
-{
-    my $c = eval { Patcher::reset_context(common_settings); };
-    if ($@) {
-        diag("exception: $@");
-        fail("reset_context");
-    } else {
-        cmp_deeply($c, { common_settings, }, "reset_context");
-    }
-}
-
-
-sub dd {
-    my $msg = "";
-    for my $arg (@_) {
-        if (ref($arg) eq "" and defined $arg) {
-            $msg .= $arg;
-        } else {
-            $msg .= Data::Dumper->new([$arg])->Indent(1)->Terse(1)->Sortkeys(1)
-                ->Dump;
-        }
-    }
-    diag($msg);
-}
-
-
-sub eval_test {
-    my ($tname, $sub, $action, $check) = @_;
-    Patcher::reset_context(common_settings);
-    my $res = eval { $sub->() };
-    if ($action eq "catch") {
-        if ($@) {
-            return like($@, $check, $tname);
-        } else {
-            fail($tname);
-            dd("expected exception, got value: ", $res);
-            return 0;
-        }
-    }
-
-    if ($@) {
-        fail($tname);
-        dd("expected value, got exception: ", $@);
-        return 0;
-    }
-
-    if ($action eq "compare") {
-        cmp_deeply($res, $check, $tname)
-            or dd("full result was:\n", $res);
-        return;
-    }
-
-    die "unknown action $action";
-}
+my @tests = (sub { use_ok("Patcher") });
+sub eval_test;
 
 # context manipulation tests
 
@@ -145,9 +64,9 @@ eval_test(
     compare => 1,
 );
 
+# loader tests
 my $bits = "$FindBin::Bin/bits";
 
-# loader tests
 eval_test(
     "load_config",
     sub {
@@ -803,8 +722,86 @@ eval_test(
     compare => "68 05 00 00 00 68 00 00 00 00 ",
 );
 
+plan tests => scalar(@tests);
+$_->() for @tests;
+exit 0;
+
 # TODO big section check before apply
 # TODO multiple sections
 # TODO multiple definitions
 # TODO linking conflicts
 # TODO undefined symbol
+
+sub dump_diag_ {
+    my $msg = "";
+    for my $arg (@_) {
+        if (ref($arg) eq "" and defined $arg) {
+            $msg .= $arg;
+        } else {
+            $msg .= Data::Dumper->new([$arg])->Indent(1)->Terse(1)->Sortkeys(1)
+                ->Dump;
+        }
+    }
+    diag($msg);
+}
+
+sub eval_test_ {
+    my ($tname, $sub, $action, $check) = @_;
+    my $res = eval {
+        Patcher::reset_context(
+            settings => {
+                need_listing    => 1,
+                honor_alignment => 0,
+                quiet           => 1,
+            },
+            section_offset        => {},
+            section_length        => {},
+            section_base          => {},
+            section_source        => {},
+            section_pspace_offset => {},
+            section_pspace_length => {},
+            source_bytes          => {},
+            source_input_file     => {},
+            source_output_file    => {},
+            symbol_section        => {},
+            symbol_offset         => {},
+            alias_symbol          => {},
+            patches               => [],
+            reloc_rel             => {},
+            reloc_abs             => {},
+            build_cache           => {},
+            build_cache_usage     => {},
+        );
+        $sub->()
+    };
+    if ($action eq "catch") {
+        if ($@) {
+            return like($@, $check, $tname);
+        } else {
+            fail($tname);
+            dump_diag_("expected exception, got value: ", $res);
+            return 0;
+        }
+    }
+
+    if ($@) {
+        fail($tname);
+        dump_diag_("expected value, got exception: ", $@);
+        return 0;
+    }
+
+    if ($action eq "compare") {
+        cmp_deeply($res, $check, $tname)
+            or dump_diag_("full result was:\n", $res);
+        return;
+    }
+
+    die "unknown action $action";
+}
+
+sub eval_test {
+    my @args = @_;
+    die "argument 3 of eval_test must be either 'catch' or 'compare', got '$args[2]'"
+        if $args[2] !~ /^(catch|compare)$/;
+    push (@tests, sub { eval_test_(@args) });
+}

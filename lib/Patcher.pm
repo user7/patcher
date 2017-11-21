@@ -1080,13 +1080,13 @@ sub _rebuild {
 
 
 sub tt {
-    return Data::Dumper->new([ _rebuild @_ ])->Indent(0)->Terse(1)->Sortkeys(1)
+    return Data::Dumper->new([ _rebuild(@_) ])->Indent(0)->Terse(1)->Sortkeys(1)
         ->Dump;
 }
 
 
 sub ss {
-    return Data::Dumper->new([ _rebuild @_ ])->Indent(1)->Terse(1)->Sortkeys(1)
+    return Data::Dumper->new([ _rebuild(@_) ])->Indent(1)->Terse(1)->Sortkeys(1)
         ->Dump;
 }
 
@@ -1279,7 +1279,7 @@ sub _parse_objdump {
         } else {
             my $gl;
             ($off, $gl, $sname, $sym) =
-                $sl =~ /^([0-9a-f]+)( g.{7}| l {7})(\S+)\s+\S+\s+(.*)/;
+                $sl =~ /^([0-9a-f]+)( g.{7}| l {5}[O ] )(\S+)\s+\S+\s+(.*)/;
             next unless defined $sym;
             $linkage = "local" if $gl =~ /^ l/;
             $linkage = "local" if $sym =~ s/^\.hidden //g;
@@ -1349,7 +1349,8 @@ sub _parse_objdump {
                 $link_rel{$roff} = $sym . _unpack_delta($bytes, $roff, $dfunc);
                 next;
             }
-            _die "unknown reloc type $rtype";
+
+            _die "unsupported relocation type $rtype";
         }
     }
 
@@ -1426,12 +1427,56 @@ sub gcc {
 
     my $out;
     my $tmpf = File::Temp->new(TEMPLATE => "bp-gcc-XXXXX");
-    my @build_opts;
-    @build_opts = @{ $opts->{build_opts} }
-        if ref($opts->{build_opts});
+
+    # Since patcher doesn't support PLT and GOT relocations, here we pass
+    # -fno-pic and -fno-plt to gcc. On the other hand some older versions of gcc
+    # don't know (and don't need) -fno-plt switch, so if it's unrecognized we
+    # retry building without it.
+    my @noplt = "-fno-plt";
+RETRY:
+    @noplt = () if $ctx->{settings}{forbid_no_plt};
+    unless (
+        IPC::Run::run [
+            qw/ gcc -xc -m32 -fno-asynchronous-unwind-tables -march=i386
+                -ffreestanding -fno-pic /,
+            @noplt,
+            @{ $opts->{build_opts} // [] },
+            "-c",
+            (defined $code ? ("-") : ()),
+            "-o",
+            $tmpf,
+        ],
+        (defined $code ? ("<", \$code) : ()), "&>", \$out
+    )
+    {
+        if (not defined $ctx->{settings}{forbid_no_plt}
+            and $out =~ /unrecognized command line option .*-fno-plt/m)
+        {
+            $ctx->{settings}{forbid_no_plt} = 1;
+            goto RETRY;
+        }
+        _croak_source("when compiling:", $code // "", $out);
+    }
+
+    return _objdump($tmpf, $opts);
+}
+
+
+sub clang {
+    my ($code, $opts) = @_;
+
+    _die "scalar with C code expected as first argument, got ", tt($code)
+        if defined $code and ref($code) ne "";
+
+    $opts //= {};
+    _die "opts hash ref expected as second argument, got ", tt($opts)
+        unless ref($opts) eq "HASH";
+
+    my $out;
+    my $tmpf = File::Temp->new(TEMPLATE => "bp-clang-XXXXX");
     IPC::Run::run [
-        qw/ gcc -xc -m32 -fno-asynchronous-unwind-tables -march=i386 -ffreestanding /,
-        @build_opts,
+        qw/ clang -xc -m32 -march=i386 -ffreestanding /,
+        @{ $opts->{build_opts} // [] },
         "-c",
         (defined $code ? ("-") : ()),
         "-o",
@@ -1541,6 +1586,9 @@ sub _build_chunk {
 
     return { %$node, %{ gcc($node->{source}, $node->{opts}) } }
         if $node->{format} eq "gcc";
+
+    return { %$node, %{ clang($node->{source}, $node->{opts}) } }
+        if $node->{format} eq "clang";
 
     _die "unknown format $node->{format}";
 }
