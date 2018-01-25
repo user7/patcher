@@ -1,0 +1,128 @@
+#!/usr/bin/perl
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use Patcher qw/ load_config modify_context /;
+
+use File::Slurp;
+use Getopt::Long;
+use List::Util qw/ min max /;
+
+my $glue_max_dist = 0;
+my @f;
+my %d;
+my %alias;
+my %primary;
+my %force_patch;
+my @p;
+
+sub add_file {
+    my ($k, $v) = @_;
+    my ($file, $alias) = split /=/, $v;
+    $alias //= $file;
+    push(@f, $file);
+    $alias{$file} = $alias;
+    if ($k eq "p") {
+        $primary{$file} = 1;
+        push(@p, $file);
+    }
+}
+
+sub add_force {
+    my ($k, $v) = @_;
+    die "no ':' in forced patch spec"
+        unless $v =~ /(.*):(.*)/;
+    my @a = ($1, $2);
+    for (@a) {
+        my $e = eval $_;
+        die "unable to eval $_: $@"
+            if $@;
+        $_ = $e;
+    }
+    die "invalid forced patch length $a[1]"
+        unless $a[1];
+    $force_patch{ $a[0] } = $a[1];
+}
+
+GetOptions(
+    "d|dist=i"        => \$glue_max_dist,
+    "p|primary=s"     => \&add_file,
+    "s|secondary=s"   => \&add_file,
+    "f|force-patch=s" => \&add_force,
+) or die "error parsing command line arguments";
+
+die "usage: emit-delta-nway -p prim1 [ -s sec1 ] [ -p prim2 ] [ -d delta ]"
+    unless @p;
+
+$d{$_} = scalar(read_file($_)) for @f;
+print "# loaded files\n";
+
+$| = 1;
+print "# files:\n";
+printf "#  %s%s\n", $_ eq $alias{$_} ? $_ : "$alias{$_} $_",
+    $primary{$_} ? "" : " (s)"
+    for @f;
+print "# glue delta = $glue_max_dist\n";
+my $imax = min map { length $_ } values %d;
+
+my $n = 1;
+my $last_off;
+my $last_end;
+my $nm = 1;
+my $p0 = shift @p;
+
+sub match {
+    my ($i, $len) = @_;
+    die "internal error, compare beyond max offset" if $i >= $imax;
+    $len = $imax - $i if $i + $len > $imax;
+    for my $p (@p) {
+        return 0 if substr($d{$p0}, $i, $len) ne substr($d{$p}, $i, $len);
+    }
+    return 1;
+}
+
+my $prev_end;
+
+sub add_patch {
+    my ($i, $len, $forced) = @_;
+    printf "    {\n";
+    printf "        off => 0x%x, # sym=%s len=%d", $i,
+        Patcher::find_symbol($i), $len;
+    printf " skip=%d", $i - $prev_end
+        if defined $prev_end;
+    printf " forced"
+        if $forced;
+    $prev_end = $i + $len;
+    print "\n";
+    printf "        alt => [\n";
+
+    for my $f (@f) {
+        my $h = unpack("H*", substr($d{$f}, $i, $len));
+        $h =~ s/../$& /g;
+        printf "             \"%s\", # %s\n", $h, $alias{$f};
+    }
+    printf "        ]\n";
+    printf "    },\n";
+}
+
+my $w = max map { length $_ } values %alias;
+print "[\n";
+my $glue = $glue_max_dist + 1;
+for (my $i = 0 ; $i < $imax ; ++$i) {
+again:
+    if (defined $force_patch{$i}) {
+        add_patch($i, $force_patch{$i}, 1);
+        $i += $force_patch{$i};
+        goto again;
+    }
+
+    next if match($i, 1);
+
+    for (my $j = $i + 1 ; ; ++$j) {
+        if ($j >= $imax or defined $force_patch{$j} or match($j, $glue)) {
+            add_patch($i, $j - $i);
+            $i = $j;
+            last;
+        }
+    }
+}
+print "]\n";
