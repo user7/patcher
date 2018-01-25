@@ -1,0 +1,26 @@
+#!/bin/perl
+use warnings;
+use strict;
+use File::Slurp;
+
+my ($exe, $re, @ARGV) = @ARGV;
+
+die 'usage: rfind bianry hex-regex
+
+Returns offset corresponding to regexp matches against hex dump. E.g. string
+"boo" in file corresponds to "62 6F 6F", so to find it you could use any of:
+rfind file.bin "62 6F 6F"
+rfind file.bin "62 .. 6F"
+rfind file.bin "62( 6F){2,}"
+'
+    unless defined $re and defined $exe;
+
+$re = qr/$re/i;
+
+my $data = unpack('H*', read_file $exe);
+$data =~ s/../$& /g;
+
+while ($data =~ /$re/g) {
+    my $pos = $-[0] / 3;
+    printf "%-10d 0x%-8x %s\n", $pos, $pos, $&;
+}

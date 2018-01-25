@@ -1,0 +1,46 @@
+#!/bin/perl
+use warnings;
+use strict;
+use File::Slurp;
+
+my ($exe, $str, @ARGV) = @ARGV;
+
+die "usage: bfind binary hex-string
+
+Lists all offsets of occurances of a string in a file. The string is given as a
+sequence of bytes in hex, e.g.:
+bfind file.bin 626F6F
+"
+    unless defined $str and defined $exe;
+
+my $data = read_file $exe;
+
+sub hex_to_bin {
+    my $h = shift;
+    $h =~ s/\s//g;
+    return pack("H*", $h);
+}
+
+if ($str) {
+    do_find(hex_to_bin $str);
+} else {
+    while (<STDIN>) {
+        chomp;
+        eval { do_find(hex_to_bin $_) };
+        print "bad string: $@"
+            if $@;
+    }
+}
+
+sub do_find {
+    my $s = shift;
+    my $i = 0;
+    while (1) {
+        $i = index $data, $s, $i;
+        last
+            if $i == -1;
+
+        printf "found: 0x%-8x %d\n", $i, $i;
+        ++$i;
+    }
+}
