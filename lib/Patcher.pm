@@ -270,6 +270,7 @@ sub patch_divert {
 # last moment, however diverts produced may overlap-clash with other patches.
 sub patch_divert_all {
     my ($sec, $old_target, $new_target) = @_;
+    return unless _check_filter({ topic => $ctx->{topic} // "" });
 
     croak "unknown section or not bound to source"
         unless defined $sec and defined $ctx->{section_source}{$sec};
@@ -404,6 +405,18 @@ sub _add_symbol {
 }
 
 
+sub _check_filter {
+    my $p      = shift;
+    my $filter = $ctx->{settings}{patch_filter};
+    return 1 unless defined $filter;
+    if (ref($filter) eq "Regexp") {
+        return 1 if ($p->{topic} // "") =~ $filter;
+    } else {
+        croak "unsupported filter type '" . ref($filter) . "'";
+    }
+}
+
+
 sub _patch {
     my $p = shift;
     _update_offsets($p);
@@ -448,6 +461,7 @@ sub _patch {
         $p->{topic} = $ctx->{topic}
             if defined $ctx->{topic};
     }
+    return unless _check_filter($p);
 
     push(@{$ctx->{patches}}, $p);
 }
