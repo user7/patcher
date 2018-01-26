@@ -1077,13 +1077,64 @@ sub _wrap {
 }
 
 
+sub _asciify_string {
+    my $max_string = $ctx->{settings}{format_max_string};
+    my $s          = shift;
+    my $ell;
+    substr($s, $max_string) = '', $ell = 1
+        if defined $max_string and length($s) > $max_string;
+    unless ($ctx->{settings}{format_dont_asciify}) {
+        $s = '!' . _hexdump($s) if $s =~ m/[^[:print:]\r\n\t\0 ]/;
+    }
+    substr($s, $max_string) = '', $ell = 1
+        if defined $max_string && length($s) > $max_string;
+    substr($s, -3) = "..."
+        if $ell;
+    return $s;
+}
+
+
+sub _rebuild {
+    my ($v) = @_;
+    return $v
+        unless defined $v;
+    return _asciify_string($v)
+        if ref($v) eq '';
+
+    if (ref($v) eq 'ARRAY') {
+        my @res;
+        for my $el (@$v) {
+            push(@res, _rebuild($el));
+        }
+        return \@res;
+    }
+
+    if (ref($v) eq 'HASH') {
+        my %res;
+        while (my ($key, $val) = each %$v) {
+            $res{$key} = _rebuild($val);
+        }
+        return \%res;
+    }
+
+    if (ref($v) eq 'SCALAR') {
+        my $s = _rebuild($$v);
+        return \$s;
+    }
+
+    _die "internal error rebuild for " . ref($v) . " is not supported";
+}
+
+
 sub tt {
-    return Data::Dumper->new(\@_)->Indent(0)->Terse(1)->Sortkeys(1)->Dump;
+    return Data::Dumper->new([ _rebuild @_ ])->Indent(0)->Terse(1)->Sortkeys(1)
+        ->Dump;
 }
 
 
 sub ss {
-    return Data::Dumper->new(\@_)->Indent(1)->Terse(1)->Sortkeys(1)->Dump;
+    return Data::Dumper->new([ _rebuild @_ ])->Indent(1)->Terse(1)->Sortkeys(1)
+        ->Dump;
 }
 
 
