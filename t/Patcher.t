@@ -1,7 +1,7 @@
 use warnings;
 use strict;
 
-use Test::Most tests => 55;
+use Test::Most tests => 53;
 use Test::Most;
 use Test::Deep;
 use FindBin;
@@ -19,11 +19,20 @@ sub common_settings {
             honor_alignment => 0,
             quiet           => 1,
         },
-        section_base   => {},
-        section_offset => {},
-        symbol_offset  => {},
-        symbol_section => {},
-        patches        => [],
+        section_offset        => {},
+        section_length        => {},
+        section_base          => {},
+        section_source        => {},
+        section_pspace_offset => {},
+        section_pspace_length => {},
+        source_bytes          => {},
+        source_input_file     => {},
+        source_output_file    => {},
+        symbol_section        => {},
+        symbol_offset         => {},
+        patches               => [],
+        reloc_rel             => {},
+        reloc_abs             => {},
     );
 }
 
@@ -126,7 +135,6 @@ eval_test(
     compare => { story => 1 },
 );
 
-# XXX should throw in strict mode
 eval_test(
     "modify_context assgin",
     sub {
@@ -234,7 +242,7 @@ eval_test(
 eval_test(
     "gas option",
     sub {
-        _unpack_deep Patcher::gas("", "-gstabs");
+        _unpack_deep Patcher::gas("", { build_opts => "-gstabs" });
     },
     compare => {
         %$obj_common, bytes => "",
@@ -250,7 +258,7 @@ eval_test(
         %$obj_common,
         format => "gas",
         bytes  => "",
-        opts   => [ "-defsym", "foo=0" ],
+        opts   => { build_opts => [ "-defsym", "foo=0" ] },
         source => "",
     },
 );
@@ -336,7 +344,7 @@ eval_test(
 eval_test(
     "gcc option",
     sub {
-        _unpack_deep Patcher::gcc("", "-O3");
+        _unpack_deep Patcher::gcc("", { build_opts => ["-O3"] });
     },
     compare => {
         %$obj_common, bytes => "",
@@ -353,7 +361,7 @@ eval_test(
         bytes  => "",
         source => "",
         format => "gcc",
-        opts   => ["-O3"],
+        opts   => { build_opts => ["-O3"] },
     },
 );
 
@@ -366,7 +374,7 @@ eval_test(
                 foo();
             }
         ",
-            "-O2",
+            { build_opts => ["-O2"] },
         );
     },
     compare => {
@@ -386,7 +394,7 @@ eval_test(
                 var = \"9\";
             }
         ",
-            "-O2",
+            { build_opts => ["-O2"] },
         );
     },
     compare => {
@@ -398,36 +406,86 @@ eval_test(
     },
 );
 
-# add_symbol from 32
 eval_test(
-    "add_symbol",
+    "add_symbol rel",
     sub {
+        Patcher::modify_context("section_offset .text" => 10);
         Patcher::add_symbol(
+            name    => "X",
+            off     => 2,
             section => ".text",
-            name    => 'X',
-            off     => 3,
         );
         $Patcher::ctx;
     },
-    compare => {
-        common_settings,
-        settings       => ignore,
-        symbol_offset  => { X => 3 },
-        symbol_section => { X => '.text' },
+    compare => superhashof(
+        {
+            symbol_offset  => { X => 2 },
+            symbol_section => { X => '.text' },
+        }
+    ),
+);
+
+# TODO no good seg
+eval_test(
+    "add_symbol abs",
+    sub {
+        Patcher::modify_context("settings deduce_section" => 1);
+        Patcher::modify_context("section_offset .text"    => 10);
+        Patcher::modify_context("section_source .text"    => "s");
+        Patcher::add_symbol(
+            name => "X",
+            off  => 13,
+        );
+        $Patcher::ctx;
     },
+    compare => superhashof(
+        {
+            symbol_offset  => { X => 3 },
+            symbol_section => { X => ".text" },
+        }
+    ),
+);
+
+eval_test(
+    "add_symbol abs mismatch",
+    sub {
+        Patcher::modify_context("section_offset .text" => 10);
+        Patcher::add_symbol(
+            name => "X",
+            off  => "5",
+        );
+        $Patcher::ctx;
+    },
+    catch => qr/section was not specified or deduced/,
+);
+
+eval_test(
+    "add_symbol rel mismatch",
+    sub {
+        Patcher::modify_context("section_offset .text" => 10);
+        Patcher::modify_context("section_length .text" => 3);
+        Patcher::add_symbol(
+            name    => "X",
+            off     => "20",
+            section => ".text",
+        );
+        $Patcher::ctx;
+    },
+    catch => qr/offset 20 is too large for section .text/
 );
 
 eval_test(
     "add_symbol conflict",
     sub {
-        Patcher::modify_context(symbol_offset => { X => 4 });
+        Patcher::modify_context("section_offset .text" => 1);
+        Patcher::modify_context("symbol_offset X"      => 4);
         Patcher::add_symbol(
+            name    => "X",
+            off     => "3",
             section => ".text",
-            name    => 'X',
-            off     => 3,
         );
     },
-    catch => qr/'X' is already defined/,
+    catch => qr/X is already defined/,
 );
 
 eval_test(
@@ -435,7 +493,7 @@ eval_test(
     sub {
         Patcher::patch();
     },
-    catch => qr/every patch needs description/,
+    catch => qr/desc is required/,
 );
 
 eval_test(
@@ -447,34 +505,34 @@ eval_test(
 );
 
 eval_test(
-    "patch cchunk -coff",
+    "patch cchunk -off",
     sub {
         Patcher::patch(
             desc   => "p1",
             cchunk => "",
         );
     },
-    catch => qr/coff is not defined/,
+    catch => qr/off is not defined/,
 );
 
 eval_test(
-    "patch coff -cchunk",
+    "patch off -cchunk",
     sub {
         Patcher::patch(
             desc => "p1",
-            coff => 0,
+            off  => 0,
         );
     },
-    catch => qr/no cchunk present, specifying coff makes no sense/,
+    catch => qr/no cchunk or pchunk/,
 );
 
 eval_test(
-    "patch build failure",
+    "patch cchunk build failure",
     sub {
         Patcher::patch(
             desc   => "p1",
-            coff   => 0,
             cchunk => "#ghc#",
+            off    => 0,
         );
     },
     catch => qr/unknown format ghc/,
@@ -486,7 +544,7 @@ eval_test(
         Patcher::patch(
             desc   => "p1",
             cchunk => " ",
-            coff   => 0,
+            off    => 0,
         );
     },
     catch => qr/empty cchunk makes no sense/,
@@ -498,40 +556,31 @@ eval_test(
         Patcher::patch(
             desc   => "p1",
             pchunk => "#go#",
-            poff   => 0,
+            off    => 0,
         );
     },
     catch => qr/unknown format go/,
 );
 
 eval_test(
-    "patch poff -pchunk",
-    sub {
-        Patcher::patch(
-            desc   => "p1",
-            cchunk => "90",
-            off    => 1,
-            poff   => 0,
-        );
-    },
-    catch => qr/no pchunk present, specifying poff makes no sense/,
-);
-
-eval_test(
     "patch cchunk",
     sub {
+        Patcher::modify_context("section_offset .text" => 1);
         Patcher::patch(
-            desc   => "p1",
-            cchunk => "61",
-            coff   => 3,
+            desc    => "p1",
+            cchunk  => "61",
+            off     => 3,
+            section => ".text",
         );
         _unpack_deep $Patcher::ctx->{patches};
     },
     compare => [
         {
-            cchunk => { bytes => "61 ", format => "hex", source => "61" },
-            coff   => 3,
-            desc   => "p1",
+            cchunk      => { bytes => "61 ", format => "hex", source => "61" },
+            off         => 3,
+            off_section => 3,
+            desc        => "p1",
+            section     => ".text",
         },
     ],
 );
@@ -539,11 +588,15 @@ eval_test(
 eval_test(
     "patch cchunk check",
     sub {
-        Patcher::modify_context(input_bytes => "ABC");
+        Patcher::modify_context("source_bytes s"       => "ABC");
+        Patcher::modify_context("section_source .text" => "s");
+        Patcher::modify_context("section_offset .text" => 0);
         Patcher::patch(
-            desc   => "p",
-            cchunk => "42",
-            coff   => 1,
+            desc    => "p",
+            cchunk  => "42",
+            off     => 1,
+            section => ".text",
+
         );
         Patcher::apply_and_save();
     },
@@ -553,18 +606,22 @@ eval_test(
 eval_test(
     "patch intersection",
     sub {
-        Patcher::modify_context(input_bytes => "ABC");
+        Patcher::modify_context("source_bytes s"       => "ABC");
+        Patcher::modify_context("section_source .text" => "s");
+        Patcher::modify_context("section_offset .text" => 0);
         Patcher::patch(
-            desc   => "1",
-            cchunk => "4142",
-            pchunk => "0000",
-            off    => 0,
+            desc    => "1",
+            cchunk  => "4142",
+            pchunk  => "0000",
+            off     => 0,
+            section => ".text",
         );
         Patcher::patch(
-            desc   => "2",
-            cchunk => "4243",
-            pchunk => "0000",
-            off    => 1,
+            desc    => "2",
+            cchunk  => "4243",
+            pchunk  => "0000",
+            off     => 1,
+            section => ".text",
         );
         Patcher::apply_and_save();
     },
@@ -574,7 +631,7 @@ eval_test(
 eval_test(
     "patch fill_nop no cchunk throws",
     sub {
-        Patcher::modify_context(input_bytes => "ABC");
+        Patcher::modify_context("source_bytes s" => "ABC");
         Patcher::patch(
             desc     => "p",
             pchunk   => "",
@@ -589,56 +646,27 @@ eval_test(
 eval_test(
     "patch fill_nop",
     sub {
-        Patcher::modify_context(input_bytes => "ABC");
+        Patcher::modify_context("section_offset .text" => 0);
+        Patcher::modify_context("section_source .text" => "s");
+        Patcher::modify_context("source_bytes s"       => "ABC");
         Patcher::patch(
             desc     => "p",
             cchunk   => "42",
-            coff     => 1,
+            off      => 1,
             fill_nop => 1,
+            section  => ".text",
         );
         Patcher::apply_and_save();
-        unpack("H*", $Patcher::ctx->{input_bytes});
+        unpack("H*", $Patcher::ctx->{source_bytes}{s});
     },
     compare => "419043",
 );
 
 eval_test(
-    "patch empty pchunk + coff throws",
+    "patch pchunk + off + fill_nop",
     sub {
-        Patcher::modify_context(input_bytes => "ABC");
-        Patcher::patch(
-            desc   => "p",
-            cchunk => "42",
-            pchunk => "",
-            coff   => 1,
-        );
-        Patcher::apply_and_save();
-        unpack("H*", $Patcher::ctx->{input_bytes});
-    },
-    catch => qr/no poff when both cchunk and pchunk are present/,
-);
-
-eval_test(
-    "patch empty pchunk + coff + fill_nop throws",
-    sub {
-        Patcher::modify_context(input_bytes => "ABC");
-        Patcher::patch(
-            desc     => "p",
-            cchunk   => "42",
-            fill_nop => 1,
-            pchunk   => "",
-            coff     => 1,
-        );
-        Patcher::apply_and_save();
-        unpack("H*", $Patcher::ctx->{input_bytes});
-    },
-    catch => qr/no poff when both cchunk and pchunk are present/,
-);
-
-eval_test(
-    "patch pchunk + coff + fill_nop",
-    sub {
-        Patcher::modify_context(input_bytes => "ABC");
+        Patcher::modify_context(default_source   => "s");
+        Patcher::modify_context("source_bytes s" => "ABC");
         Patcher::patch(
             desc     => "p",
             cchunk   => "42 43",
@@ -647,69 +675,35 @@ eval_test(
             pchunk   => "00",
         );
         Patcher::apply_and_save();
-        unpack("H*", $Patcher::ctx->{input_bytes});
+        unpack("H*", $Patcher::ctx->{source_bytes}{s});
     },
     compare => "410090",
 );
 
 eval_test(
-    "patch pchunk + poff + coff + fill_nop",
-    sub {
-        Patcher::modify_context(input_bytes => "ABC ");
-        Patcher::patch(
-            desc     => "p",
-            cchunk   => "41 42 43",
-            coff     => 0,
-            poff     => 1,
-            fill_nop => 1,
-            pchunk   => "aa",
-        );
-        Patcher::apply_and_save();
-        Patcher::_hexdump($Patcher::ctx->{input_bytes});
-    },
-    compare => "41 aa 90 20 ",
-);
-
-eval_test(
     "patch cchunk out of range",
     sub {
-        Patcher::modify_context(input_bytes => "zxc");
+        Patcher::modify_context(default_source   => "s");
+        Patcher::modify_context("source_bytes s" => "zxc");
         Patcher::patch(
             desc   => "p",
             cchunk => "aa bb",
-            coff   => 2,
+            off    => 2,
         );
         Patcher::apply_and_save();
     },
-    catch => qr/attempt to check range.*not inside source file/,
-);
-
-eval_test(
-    "patch pchunk before cchunk",
-    sub {
-        Patcher::modify_context(input_bytes => "zxc");
-        Patcher::patch(
-            desc   => "p",
-            cchunk => "aa bb",
-            coff   => 1,
-            pchunk => "cc dd",
-            poff   => 0,
-        );
-        Patcher::apply_and_save();
-    },
-    catch => qr/cchunk starts after pchunk/,
+    catch => qr/attempt to check range not within source/,
 );
 
 eval_test(
     "patch pchunk after cchunk",
     sub {
-        Patcher::modify_context(input_bytes => "zxc");
+        Patcher::modify_context("source_bytes s" => "zxc");
         Patcher::patch(
             desc   => "p",
-            cchunk => "aa bb",
-            coff   => 0,
+            cchunk => "aa",
             pchunk => "cc dd",
-            poff   => 1,
+            off    => 0,
         );
         Patcher::apply_and_save();
     },
@@ -719,31 +713,35 @@ eval_test(
 eval_test(
     "patch free pchunk no pspace throws",
     sub {
-        Patcher::modify_context(input_bytes => "ABC ");
+        Patcher::modify_context("source_bytes s"       => "zxc");
+        Patcher::modify_context("section_source .text" => "s");
+        Patcher::modify_context("section_offset .text" => 0);
         Patcher::patch(
-            desc   => "p",
-            pchunk => "aa",
+            desc    => "p",
+            pchunk  => "aa",
+            section => ".text",
         );
         Patcher::apply_and_save();
-        Patcher::_hexdump($Patcher::ctx->{input_bytes});
+        Patcher::_hexdump($Patcher::ctx->{source_bytes}{s});
     },
-    catch => qr/unable to place, pspace_off is not defined/,
+    catch => qr/unable to place '.*', no pspace/,
 );
 
 eval_test(
     "patch free pchunk out of pspace",
     sub {
+        Patcher::modify_context("source_bytes s" => "ABC");
         Patcher::modify_context(
-            input_bytes => "ABC ",
-            pspace_off  => 1,
-            pspace_len  => 2,
+            "section_pspace_offset .text" => 1,
+            "section_pspace_length .text" => 2,
         );
         Patcher::patch(
-            desc   => "p",
-            pchunk => "aa bb cc",
+            desc    => "p",
+            pchunk  => "aa bb cc",
+            section => ".text",
         );
         Patcher::apply_and_save();
-        Patcher::_hexdump($Patcher::ctx->{input_bytes});
+        Patcher::_hexdump($Patcher::ctx->{source_bytes}{s});
     },
     catch => qr/no free patch space left for patch/,
 );
@@ -752,48 +750,57 @@ eval_test(
     "link call loop",
     sub {
         Patcher::modify_context(
-            input_bytes => "\0" x 10,
-            pspace_off  => 0,
-            pspace_len  => 10,
+            source_bytes          => { s       => "\0" x 10 },
+            section_source        => { ".text" => "s" },
+            section_offset        => { ".text" => 0 },
+            section_pspace_offset => { ".text" => 0 },
+            section_pspace_length => { ".text" => 10 },
         );
         Patcher::patch(
-            desc   => "add foo",
-            pchunk => "#gas# call bar",
-            name   => "foo",
+            desc    => "add foo",
+            pchunk  => "#gas# call bar",
+            name    => "foo",
+            section => ".text",
         );
         Patcher::patch(
-            desc   => "add bar",
-            pchunk => "#gas# call foo",
-            name   => "bar",
+            desc    => "add bar",
+            pchunk  => "#gas# call foo",
+            name    => "bar",
+            section => ".text",
         );
         Patcher::apply_and_save();
-        _unpack_deep $Patcher::ctx;
+        Patcher::_hexdump($Patcher::ctx->{source_bytes}{s});
     },
-    compare => superhashof({ input_bytes => "e8 00 00 00 00 e8 f6 ff ff ff " }),
+    compare => "e8 00 00 00 00 e8 f6 ff ff ff ",
 );
 
+# TODO check deduce section
 eval_test(
     "link var loop",
     sub {
         Patcher::modify_context(
-            input_bytes => "\0" x 10,
-            pspace_off  => 0,
-            pspace_len  => 10,
+            source_bytes          => { s       => "\0" x 10 },
+            section_source        => { ".text" => "s" },
+            section_offset        => { ".text" => 0 },
+            section_pspace_offset => { ".text" => 0 },
+            section_pspace_length => { ".text" => 10 },
         );
         Patcher::patch(
-            desc   => "add foo",
-            pchunk => "#gas# push offset bar",
-            name   => "foo",
+            desc    => "add foo",
+            pchunk  => "#gas# push offset bar",
+            name    => "foo",
+            section => ".text",
         );
         Patcher::patch(
-            desc   => "add bar",
-            pchunk => "#gas# push offset foo",
-            name   => "bar",
+            desc    => "add bar",
+            pchunk  => "#gas# push offset foo",
+            name    => "bar",
+            section => ".text",
         );
         Patcher::apply_and_save();
-        _unpack_deep $Patcher::ctx;
+        Patcher::_hexdump($Patcher::ctx->{source_bytes}{s});
     },
-    compare => superhashof({ input_bytes => "68 05 00 00 00 68 00 00 00 00 " }),
+    compare => "68 05 00 00 00 68 00 00 00 00 ",
 );
 
 # the final boss of a test
@@ -811,25 +818,27 @@ eval_test(
     my $default_off = 0x20000;
     my $actual_off  = 0x30000;
 
-    my $var_ref_dseg = 4;                           # in .text
-    my $var_ref_off  = $text_off + $var_ref_dseg;
+    my $var_ref_dseg = 4;               # in .text
+    my $var_ref_off  = $var_ref_dseg;
 
     my $var_loc_dseg   = 8;                                           # in .data
     my $var_loc_actual = $data_vbase + $actual_off + $var_loc_dseg;
 
-    my $pspace_off = 16 + $text_off;
-    my $pspace_len = $data_off - $pspace_off - 32;
+    my $pspace_off = 16;
+    my $pspace_len = $text_len - $pspace_off;
 
-    my $var2_dseg = 0x44;                                             # in .data
+    my $var44_dseg = 0x44;                                            # in .data
 
+    my $sbytes = $file_header . "\0" x ($text_len + $data_len);
     eval_test(
         "relocator",
         sub {
             Patcher::modify_context(
-                input_bytes => $file_header . "\0" x ($text_len + $data_len),
-                pspace_off  => $pspace_off,
-                pspace_len  => $pspace_len,
-                section_base => {
+                source_bytes          => { s       => $sbytes },
+                section_source        => { ".text" => "s" },
+                section_pspace_offset => { ".text" => $pspace_off },
+                section_pspace_length => { ".text" => $pspace_len },
+                section_base          => {
                     ".text" => $text_vbase + $default_off,
                     ".data" => $data_vbase + $default_off,
                 },
@@ -837,43 +846,39 @@ eval_test(
                     ".text" => $text_off,
                     ".data" => $data_off,
                 },
+                "settings relocator" => "r",
 
-                "settings relocator" => "proc_reloc",
-                data_bootstrap_ptr   => $text_off + $var_ref_dseg,
-                data_bootstrap_var   => $data_off + $var_loc_dseg,
+                # "settings deduce_section" => 1,
+                data_bootstrap_ptr => $text_off + $var_ref_dseg,
+                data_bootstrap_var => $data_off + $var_loc_dseg,
             );
             Patcher::patch(
-                desc   => "add fake bootstrap",
-                pchunk => "#gas# .int $var_loc_actual",
-                poff   => $var_ref_off,
+                desc    => "add fake bootstrap",
+                pchunk  => "#gas# .int $var_loc_actual",
+                off     => $var_ref_off,
+                section => ".text",
             );
             Patcher::patch(
-                desc   => "add push self",
-                pchunk => "#gas#
-                    msg:
-                        push offset msg + 4
-                ",
+                desc    => "add push self",
+                pchunk  => "#gas# msg: push offset msg + 4",
+                section => ".text",
             );
             Patcher::add_symbol(
                 section => ".data",
-                name    => "var2",
-                off     => $data_off + $var2_dseg
+                name    => "var44",
+                off     => $var44_dseg
             );
             Patcher::patch(
-                desc   => "add push var2",
-                pchunk => "#gas#
-                        push offset var2
-                ",
+                desc    => "add push var44",
+                pchunk  => "#gas# push offset var44",
+                section => ".text",
             );
             Patcher::apply_and_save();
 
-            my $li = $Patcher::ctx->{patches}[-1]{pchunk}{listing};
-
-            # diag($li);
-
-            my $ch = _unpack_deep($Patcher::ctx)->{input_bytes};
-            $ch =~ s/(00 )+$//;
-            return $ch;
+            # diag($Patcher::ctx->{patches}[-1]{pchunk}{listing});
+            my $x = Patcher::_hexdump($Patcher::ctx->{source_bytes}{s});
+            $x =~ s/(00 ){10,}//g;
+            return $x;
         },
         compare => re(
             "11 22 33 "                # header
@@ -881,7 +886,7 @@ eval_test(
                 . "08 10 03 00 "       # pointer to var_loc_actual
                 . "00 " x 8            # skip before pspace
                 . "68 14 00 02 00 "    # push pointer to itself + 4
-                . "68 44 10 02 00 "    # push pointer to var2 in .data
+                . "68 44 10 02 00 "    # push pointer to var44 in .data
                 . ".* c3 "             # relocator
                 . "11 00 00 00 "       # relocation at .text+0x11
                 . "14 00 00 00 "       #  referring to .text+0x14
@@ -891,6 +896,7 @@ eval_test(
     );
 }
 
+# TODO big section check before apply
 # TODO multiple sections
 # TODO multiple definitions
 # TODO linking conflicts

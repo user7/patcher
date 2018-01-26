@@ -5,6 +5,8 @@ use lib "$FindBin::Bin/../lib";
 use Patcher qw/ modify_context load_config /;
 use Getopt::Long;
 use File::Copy;
+use File::Slurp;
+use Carp qw/ verbose croak /;
 
 my $input = "j/input.exe";
 my @output;
@@ -12,6 +14,8 @@ my @renames;
 my $digest;
 my $example;
 my $build;
+my $bin;
+
 
 sub set_context {
     my ($opt, $set) = @_;
@@ -28,19 +32,20 @@ GetOptions(
     "d|digest=s"         => \$digest,
     "x|config-example=s" => \$example,
     "b|build-example=s"  => \$build,
+    "n|bin=s"            => \$bin,
     "set-context=s"      => \&set_context,
 ) or die "bad commad line arguments";
 
 if (defined $input) {
     die "no such file $input"
         unless -f $input;
-    modify_context(input_file => $input);
+    modify_context("source_input_file exe" => $input);
 }
 
 my $o;
 if (@output) {
     $o = shift @output;
-    modify_context(output_file => $o);
+    modify_context("source_output_file exe" => $o);
 }
 
 modify_context(config_example => $example)
@@ -49,7 +54,32 @@ modify_context(config_example => $example)
 load_config(@ARGV);
 
 Patcher::apply_and_save();
-print "space left: $Patcher::ctx->{pspace_len}\n";
+
+
+sub write_file_aux {
+    my ($f, $d) = @_;
+    write_file($f, $d);
+    print "written $f\n";
+}
+
+if (defined $bin) {
+    my $desc = $Patcher::ctx->{bin_desc_bytes} // "";
+    my $relocs = $Patcher::ctx->{reloc_chunk_bytes};
+    croak "reloc chunk does not exist"
+        unless defined $relocs;
+
+    my $code = $Patcher::ctx->{source_bytes}{bin};
+    croak "no bin code is built"
+        unless defined $bin;
+
+    my $header = pack(
+        "VVV",
+        length($desc) + length($relocs) + length($code),    #
+        length($desc),
+        length($desc) + length($relocs),
+    );
+    write_file_aux($bin, $header . $desc . $relocs . $code);
+}
 
 if (defined $o) {
     for my $copy (@output) {
@@ -66,12 +96,18 @@ if (defined $digest) {
     Patcher::print_patches($digest);
 }
 
-use File::Slurp;
-write_file($example, $Patcher::ctx->{cpatch}{conf_example})
-    if $example and $Patcher::ctx->{cpatch}{conf_example};
 
-write_file($build, $Patcher::ctx->{cpatch}{conf_build})
-    if $build and $Patcher::ctx->{cpatch}{conf_build};
+sub put_generated_file {
+    my ($f, $desc, $item) = @_;
+    return unless defined $f;
+    my $r = Patcher::context_get(qw/ conf_gen generated /, $item);
+    croak "no conf_gen generated $item in patcher context"
+        unless defined $r;
+    write_file_aux($f, $r);
+}
+
+put_generated_file($example, "config example",     "config_example");
+put_generated_file($build,   "build list example", "build_example");
 
 if (@renames) {
     my $r = shift @renames;
@@ -79,12 +115,14 @@ if (@renames) {
         or die "unable to open $r: $!";
 
     my %adjust = (
-        ".text" => -546452,
-        ".data" => -517780,
+        ".text" => $Patcher::ctx->{section_base}{".text"},
+        ".data" => $Patcher::ctx->{section_base}{".data"},
     );
+
     my $offs = $Patcher::ctx->{symbol_offset};
     for my $sym (sort { $offs->{$a} <=> $offs->{$b} } keys %$offs) {
         my $sec = $Patcher::ctx->{symbol_section}{$sym};
+        next unless exists $adjust{$sec};
         my $off = $offs->{$sym} + $adjust{$sec};
         printf $fh "MakeName(0x%x, '%s_%x');\n", $off, $sym, $off
             if $sec and $off > 0;
