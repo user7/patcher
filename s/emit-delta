@@ -1,0 +1,59 @@
+#!/usr/bin/perl
+use warnings;
+use strict;
+
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use Patcher qw/ load_config modify_context /;
+use File::Slurp;
+use Getopt::Long;
+use List::Util qw/ min /;
+
+my $glue_max_dist = 0;
+GetOptions("d|dist=i" => \$glue_max_dist);
+
+die "usage: emit-delta file1 file2 [ -d <glue_max_dist> ]"
+    unless @ARGV == 2;
+
+my @f = @ARGV;
+my @d = map { scalar(read_file $_) } @f;
+my @l = map { length $_ } @d;
+print "# patch $f[0] => $f[1]\n";
+print "# glue delta = $glue_max_dist\n";
+my $imax = min @l;
+my $n    = 1;
+my $last_off;
+my $last_end;
+
+for (my $i = 0 ; $i < $imax ; ++$i) {
+    next if substr($d[0], $i, 1) eq substr($d[1], $i, 1);
+
+    my $off = $i;
+    my $eq  = 0;
+    ++$i;
+    for (; $i < $imax ; ++$i) {
+        $eq = 0, next
+            if substr($d[0], $i, 1) ne substr($d[1], $i, 1);
+
+        ++$eq;
+        if ($eq > $glue_max_dist) {
+            my @s =
+                map { unpack("H*", substr($_, $off, $i + 1 - $eq - $off)) } @d;
+            $_ =~ s/../$& /g for @s;
+
+            printf "patch(
+    desc    => 'patch $n',
+    off     => 0x%x, # sym=%s
+    cchunk  => '$s[0]',
+    pchunk  => '$s[1]',
+); # len=$eq%s\n\n", $off, Patcher::find_symbol($off),
+                defined $last_off
+                ? " step=" . ($off - $last_off) . " gap=" . ($off - $last_end)
+                : "";
+            $last_off = $off;
+            $last_end = $last_off + $eq;
+            ++$n;
+            last;
+        }
+    }
+}

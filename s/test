@@ -3,3 +3,4 @@ set -e
 prove
 s/rfind s/rfind '20 72 66 69 6e 64 20'
 s/bfind s/bfind '20 62 66 69 6e 64 20'
+perl -c s/emit-delta
