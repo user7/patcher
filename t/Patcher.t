@@ -161,7 +161,7 @@ eval_test(
         Patcher::load_config("non-existent");
         return Patcher::modify_context()->{settings}{good_load};
     },
-    catch => qr/file non-existent not found/,
+    catch => qr/non-existent' - sysopen: No such file or directory/,
 );
 
 eval_test(
@@ -625,7 +625,7 @@ eval_test(
         );
         Patcher::apply_and_save();
     },
-    catch => qr/patches 1 and 2 intersect/,
+    catch => qr/patches '1' and '2' intersect/,
 );
 
 eval_test(

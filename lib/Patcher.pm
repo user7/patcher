@@ -7,25 +7,29 @@ use Data::Dumper;
 use File::Temp;
 use File::Slurp;
 use IPC::Run;
-use Carp qw/ verbose croak /;
 
 # perl export magic
 require Exporter;
 our @ISA       = qw/ Exporter /;
 our @EXPORT_OK = qw/
     modify_context
+    context_get
     reset_context
     load_config
     add_symbol
-    patch
-    apply_and_save
-    print_patches
     topic
+    patch
+    print_patches
     patch_divert
     patch_divert_all
+    link_apply_save
+    link_patches
+    apply_patches
+    save
     tt
     ss
     pp
+    _die
     /;
 
 
@@ -67,6 +71,7 @@ sub reset_context {
 }
 
 sub _die_args;
+sub _die;
 
 
 sub modify_context {
@@ -87,11 +92,7 @@ sub modify_context {
     for my $src (sort keys %{$ctx->{source_input_file}}) {
         my $f = $ctx->{source_input_file}{$src};
         next if defined $ctx->{source_bytes}{$src};
-        $ctx->{source_bytes}{$src} = read_file(
-            $f,
-            binmode  => ":raw",
-            err_mode => "carp",
-        );
+        $ctx->{source_bytes}{$src} = read_file($f, binmode => ":raw");
     }
 
     return $ctx;
@@ -99,19 +100,37 @@ sub modify_context {
 
 reset_context();
 
+
+sub context_get {
+    my @path;
+    my $r = $ctx;
+    for my $p (@_) {
+        push(@path, $p);
+        _die "no value " . join(".", @path) . " in patcher context"
+            unless ref($r) eq "HASH";
+        $r = $r->{$p};
+    }
+    return $r;
+}
+
 #
 # ----------------
 #  config loader
 
+our $DYING = 0;
+
 
 sub load_config {
-    for my $c (@_) {
-        croak "file $c not found"
-            unless -f $c;
-
-        do $c;
-        die if $@;
-        die "unable to read $c: $@" if $!;
+    for my $f (@_) {
+        modify_context("load_config_current_file", $f);
+        eval {
+            my $e = eval qq(#line 1 "$f"\n) . read_file $f;
+            die $@ if $@;
+        };
+        if ($@) {
+            die $@ if $DYING;
+            _die "error in $f: $@";
+        }
     }
 }
 
@@ -134,7 +153,7 @@ sub patch {
 
     $p->{desc} //= $ctx->{settings}{default_desc};
 
-    croak "desc is required"
+    _die "desc is required"
         unless defined $p->{desc} and ref($p->{desc}) eq "";
 
     _eval_rethrow(sub { _patch($p) }, "when parsing '$p->{desc}'", $p);
@@ -157,7 +176,7 @@ sub print_patches {
     my $fh;
     if ($file) {
         open $fh, ">", $file
-            or croak "unable to open $file: $!";
+            or _die "unable to open $file: $!";
     } else {
         $fh = *STDOUT{IO};
     }
@@ -271,23 +290,23 @@ sub patch_divert_all {
     my ($sec, $old_target, $new_target) = @_;
     return unless _check_filter({ topic => $ctx->{topic} // "" });
 
-    croak "unknown section or not bound to source"
+    _die "unknown section or not bound to source"
         unless defined $sec and defined $ctx->{section_source}{$sec};
     my $src = $ctx->{section_source}{$sec};
-    croak "no source for section $sec"
+    _die "no source for section $sec"
         unless defined $ctx->{source_bytes}{$src};
     my $bytes = \$ctx->{source_bytes}{$src};
 
     my $soff = $ctx->{section_offset}{$sec};
     my $slen = $ctx->{section_length}{$sec};
-    croak "no offset or length for section"
+    _die "no offset or length for section"
         unless defined $soff and defined $slen;
 
     my $ot = $ctx->{symbol_offset}{$old_target};
-    croak "no symbol $old_target exists"
+    _die "no symbol '$old_target' exists"
         unless defined $ot;
 
-    croak "symbol section does not match $sec"
+    _die "symbol section does not match $sec"
         unless $ctx->{symbol_section}{$old_target} eq $sec;
 
     my $maxi = 2**32;
@@ -308,6 +327,40 @@ sub patch_divert_all {
 #
 # ------
 #  aux
+
+
+sub _stack {
+    my ($skip)    = @_;
+    my $max_depth = 30;
+    my $e         = -1;
+    my @stack     = "stack trace:";
+    my $i;
+    for ($i = $skip ; $i < $max_depth ; ++$i) {
+        my ($package, $filename, $line, $sub) = caller($i);
+        last unless $package;
+
+        splice(@stack, -2, 2)
+            if @stack >= 2
+            and $sub =~ /^(Patcher::load_config|Patcher::_eval_rethrow)$/;
+
+        push(@stack, "   $sub called at $filename line $line");
+    }
+    my $out .= join("\n", @stack, "");
+    $out .= "...\n"
+        if $i == $max_depth;
+    return $out;
+}
+
+
+sub _die {
+    my ($err) = @_;
+    die $err if $DYING;
+    $err = ss(@_) if @_ > 1 or @_ == 1 and ref($_[0]) ne '';
+    $err = "error: $err\n"
+        if defined $err and $err !~ /^error/;
+    $DYING = 1;
+    die(($err // "") . _stack(1));
+}
 
 # convert file offset to section-based if possible
 sub _update_offsets {
@@ -332,16 +385,16 @@ sub _update_offsets {
                 next if defined $o->{source} and $ssrc ne $o->{source};
                 next if $soff > $off;
                 next if defined $slen        and $off - $soff > $slen;
-                croak "sections $s and $sec both match offset $off"
+                _die "sections $s and $sec both match offset $off"
                     if defined $sec;
                 $sec = $s;
             }
             if (defined $sec) {
                 $o->{section} = $sec;
-                croak "section $sec has no offset"
+                _die "section $sec has no offset"
                     unless defined $ctx->{section_offset}{$sec};
                 my $so = $off - $ctx->{section_offset}{$sec};
-                croak "off_section is being redefined"
+                _die "off_section is being redefined"
                     if defined $o->{off_section} and $o->{off_section} != $so;
                 $o->{off_section} = $so;
             }
@@ -350,7 +403,7 @@ sub _update_offsets {
 
     if (defined($sec) and defined($off) and not defined($o->{off_section})) {
         my $slen = $ctx->{section_length}{$sec};
-        croak "offset $off is too large for section $sec"
+        _die "offset $off is too large for section $sec"
             if defined $slen and $off > $slen;
         $o->{off_section} = $off;
     }
@@ -359,13 +412,9 @@ sub _update_offsets {
         if (defined $sec) {
             my $src = $ctx->{section_source}{$sec};
             if (defined $src) {
-
-                # croak "no source for section $sec"
-                #    unless defined $src;
-
                 $o->{source} = $src;
                 if (defined $o->{off_section}) {
-                    croak "section $sec has no offset"
+                    _die "section $sec has no offset"
                         unless defined $ctx->{section_offset}{$sec};
                     $o->{off_source} =
                         $o->{off_section} + $ctx->{section_offset}{$sec};
@@ -385,18 +434,18 @@ sub _update_offsets {
 sub _add_symbol {
     my $s = shift;
     my $n = $s->{name};
-    croak "name is required"
+    _die "name is required"
         unless defined $n;
     _update_offsets($s);
-    croak "section was not specified or deduced"
+    _die "section was not specified or deduced"
         unless defined $s->{section};
-    croak "off was not specified"
+    _die "off was not specified"
         unless defined $s->{off};
     if (exists $ctx->{symbol_offset}{$n}) {
         return
             if defined $ctx->{symbol_offset}{$n}
             and $ctx->{symbol_offset}{$n} eq $s->{off};
-        croak
+        _die
             "symbol $n is already defined at $ctx->{symbol_offset}{$n} != $s->{off}";
     }
     $ctx->{symbol_offset}{$n}  = $s->{off_section};
@@ -411,7 +460,7 @@ sub _check_filter {
     if (ref($filter) eq "Regexp") {
         return 1 if ($p->{topic} // "") =~ $filter;
     } else {
-        croak "unsupported filter type '" . ref($filter) . "'";
+        _die "unsupported filter type '" . ref($filter) . "'";
     }
 }
 
@@ -420,33 +469,32 @@ sub _patch {
     my $p = shift;
     _update_offsets($p);
     if (defined $p->{cchunk}) {
-        croak "off is not defined, cchunk makes no sense"
+        _die "off is not defined, cchunk makes no sense"
             unless defined $p->{off};
 
         $p->{cchunk} = build_chunk($p->{cchunk});
-        croak "empty cchunk makes no sense"
+        _die "empty cchunk makes no sense"
             if length $p->{cchunk}{bytes} == 0;
     } else {
-        croak "no cchunk or pchunk, nothing to do"
+        _die "no cchunk or pchunk, nothing to do"
             unless defined $p->{pchunk};
     }
 
     if (defined $p->{pchunk}) {
         $p->{pchunk} = build_chunk($p->{pchunk});
     } else {
-        $p->{pchunk} = build_chunk("")
-            if $p->{fill_nop};
+        $p->{pchunk} = build_chunk("", { nocache => 1 }) if $p->{fill_nop};
     }
 
     if (defined $p->{pchunk} and defined $p->{cchunk}) {
-        croak "cchunk ends before pchunk (pchunk is not covered, "
+        _die "cchunk ends before pchunk (pchunk is not covered, "
             . length($p->{pchunk}{bytes}) . " > "
             . length($p->{cchunk}{bytes}) . ")"
             if length($p->{cchunk}{bytes}) < length($p->{pchunk}{bytes});
     }
 
     if ($p->{fill_nop}) {
-        croak "no cchunk present, fill_nop makes no sense"
+        _die "no cchunk present, fill_nop makes no sense"
             unless defined $p->{cchunk};
 
         my $d = length($p->{cchunk}{bytes}) - length($p->{pchunk}{bytes});
@@ -458,7 +506,7 @@ sub _patch {
         and defined $p->{cchunk}
         and $ctx->{settings}{require_check_match_patch})
     {
-        croak "pchunk is smaller than cchunk (forgot fill_nop?)"
+        _die "pchunk is smaller than cchunk (forgot fill_nop?)"
             if length($p->{pchunk}{bytes}) < length($p->{cchunk}{bytes});
     }
 
@@ -484,23 +532,23 @@ sub _place_patch {
     return
         unless defined $p->{pchunk};    # pure check patch
 
-    croak "unable to place patch without section"
+    _die "unable to place patch without section"
         unless defined $p->{section};
 
     my $pspace_off = $ctx->{section_pspace_offset}{ $p->{section} };
-    croak "unable to place '$p->{desc}', no pspace for $p->{section}"
+    _die "unable to place '$p->{desc}', no pspace for $p->{section}"
         unless defined $pspace_off;
     my $pspace_len = $ctx->{section_pspace_length}{ $p->{section} };
 
     my $align = -$pspace_off % ($p->{pchunk}{align} // 1);
     my $len = $align + length $p->{pchunk}{bytes};
 
-    croak "no free patch space left for patch"
+    _die "no free patch space left for patch"
         if defined $pspace_len and $pspace_len < $len;
 
     my $sec_off = $ctx->{section_offset}{ $p->{section} };
     my $sec_src = $ctx->{section_source}{ $p->{section} };
-    croak "section $p->{section} has no offset or source"
+    _die "section $p->{section} has no offset or source"
         unless defined $sec_off and defined $sec_src;
 
     $p->{off_section} = $pspace_off + $align;
@@ -524,7 +572,7 @@ sub _add_symbols {
         my $gg = $p->{pchunk}{globals};
         for my $g (sort keys %$gg) {
             my $old_id = $src_patch_id{$g};
-            croak(    "multiple definitions of $g: "
+            _die(     "multiple definitions of $g: "
                     . "in patch '$p->{desc}' and "
                     . "in patch '$ctx->{patches}[$old_id]{desc}'")
                 if defined $old_id;
@@ -558,25 +606,25 @@ sub _produce_reloc_chunk {
         for my $src_seg (sort keys %{$ctx->{$type}}) {
             my $offs        = $ctx->{$type}{$src_seg};
             my $src_seg_num = $ss{$src_seg};
-            croak "unknown section $src_seg"
+            _die "unknown section $src_seg"
                 unless defined $src_seg_num;
 
             for my $src_off (sort { $a <=> $b } keys %$offs) {
                 my $dst_ref = $offs->{$src_off};
                 my ($dst_sym, $dst_delta) = _split_ref($dst_ref);
-                croak "unable to extract symbol from ref $dst_ref"
+                _die "unable to extract symbol from ref $dst_ref"
                     unless defined $dst_sym;
 
                 my $dst_seg = $ctx->{symbol_section}{$dst_sym};
-                croak "no section for $dst_ref"
+                _die "no section for $dst_ref"
                     unless defined $dst_seg;
 
                 my $dst_seg_num = $ss{$dst_seg};
-                croak "unknown section $dst_seg"
+                _die "unknown section $dst_seg"
                     unless defined $dst_seg_num;
 
                 my $dst_off = $ctx->{symbol_offset}{$dst_sym};
-                croak "no offset for $dst_ref"
+                _die "no offset for $dst_ref"
                     unless defined $dst_off;
                 $dst_off += $dst_delta;
 
@@ -595,7 +643,7 @@ sub _create_virtual_sections {
         $src //= $sec;
         next if exists $ctx->{source_bytes}{$src};
         my $off = $ctx->{section_pspace_offset}{$sec};
-        croak "no section_pspace_offset for $sec"
+        _die "no section_pspace_offset for $sec"
             unless defined $off;
         $ctx->{source_bytes}{$src} = "\0" x $off;
     }
@@ -621,10 +669,10 @@ sub _add_relocator {
     return
         unless defined $rname;
 
-    croak "unable to produce relocator without data_bootstrap_ptr"
+    _die "unable to produce relocator without data_bootstrap_ptr"
         unless defined $ctx->{data_bootstrap_ptr};
 
-    croak "unable to produce relocator without data_bootstrap_var"
+    _die "unable to produce relocator without data_bootstrap_var"
         unless defined $ctx->{data_bootstrap_var};
 
     my %sec_offset;
@@ -637,11 +685,11 @@ sub _add_relocator {
     my $text_relocs = "";
     my $data_relocs = "";
 
-    croak "cross-section relative relocations are not supported"
+    _die "cross-section relative relocations are not supported"
         if keys %{$ctx->{reloc_rel}};
 
     my @rk = keys %{$ctx->{reloc_abs}};
-    croak "relocations outside of .text are not supported"
+    _die "relocations outside of .text are not supported"
         unless @rk < 2 and (@rk == 1 ? $rk[0] eq ".text" : 1);
 
     my $rr = $ctx->{reloc_abs}{".text"};
@@ -649,7 +697,7 @@ sub _add_relocator {
         my $ref = $rr->{$off};
         my ($sym, $delta) = _split_ref($ref);
         my $sec = $ctx->{symbol_section}{$sym};
-        croak "symbol $sym+$delta has no section defined"
+        _die "symbol $sym+$delta has no section defined"
             unless defined $sec;
         my $var_dsec = $ctx->{symbol_offset}{$sym} + $delta;
         my $rel_dsec = $off;
@@ -660,7 +708,7 @@ sub _add_relocator {
         $relocs{$sec} .= $item;
     }
 
-    croak "no symbol $rname defined"
+    _die "no symbol $rname defined"
         unless defined $ctx->{symbol_offset}{$rname};
 
     my $relocator_dsec =
@@ -745,7 +793,7 @@ sub _check_patch {
     my $cbytes = $p->{cchunk}{bytes};
     return unless defined $cbytes;
 
-    croak "attempt to check range [$p->{off_source}, "
+    _die "attempt to check range [$p->{off_source}, "
         . ($p->{off_source} - 1 + length $cbytes)
         . "] outside of the source file ("
         . length($$bytes)
@@ -753,7 +801,7 @@ sub _check_patch {
         unless $p->{off_source} + length $cbytes <= length $$bytes;
 
     my $got = substr($$bytes, $p->{off_source}, length $cbytes);
-    croak "check failed: check chunk is missing,\n"
+    _die "check failed: check chunk is missing,\n"
         . " expected: "
         . _hexdump($cbytes) . "\n"
         . "      got: "
@@ -771,7 +819,7 @@ sub _apply_patch {
     return unless defined $p->{pchunk};
     my $pbytes = $p->{pchunk}{bytes};
 
-    croak "chunk is not built"
+    _die "chunk is not built"
         unless defined $pbytes;
 
     substr($$bytes, $p->{off_source}, length $pbytes) = $pbytes;
@@ -836,18 +884,18 @@ sub _check_placement {
         _eval_rethrow(
             sub {
                 _update_offsets($p);
-                croak "no source or off_source in patch '$p->{desc}'"
+                _die "no source or off_source in patch '$p->{desc}'"
                     unless defined $p->{off_source} and defined $p->{source};
 
                 if (defined $ctx->{source_bytes}{ $p->{source} }) {
                     my $l = length $ctx->{source_bytes}{ $p->{source} };
                     if (defined $p->{cchunk}) {
-                        croak "attempt to check range not within source"
+                        _die "attempt to check range not within source"
                             unless $l >=
                             $p->{off_source} + length $p->{cchunk}{bytes};
                     }
                     if (defined $p->{pchunk}) {
-                        croak "attempt to patch range not within source"
+                        _die "attempt to patch range not within source"
                             unless $l >=
                             $p->{off_source} + length $p->{pchunk}{bytes};
                     }
@@ -869,7 +917,7 @@ sub _check_placement {
         for (my $i = 1 ; $i < @p ; ++$i) {
             my $prev = $p[ $i - 1 ];
             my $cur  = $p[$i];
-            croak "patches $prev->{desc} and $cur->{desc} intersect"
+            _die "patches '$prev->{desc}' and '$cur->{desc}' intersect"
                 if $prev->{off_source} + length $prev->{pchunk}{bytes} >
                 $cur->{off_source};
         }
@@ -888,11 +936,11 @@ sub _split_ref {
 # this is optional, returns 0 unless both section_base and section_offset are present
 sub _sym_base {
     my $sym = shift;
-    croak "_sym_base undefined symbol"
+    _die "_sym_base undefined symbol"
         unless defined $sym;    #TODO common integrity check
 
     my $sec = $ctx->{symbol_section}{$sym};
-    croak "no section for symbol $sym"
+    _die "no section for symbol $sym"
         unless defined $sec;
 
     return $ctx->{section_base}{$sec} // 0;
@@ -901,9 +949,9 @@ sub _sym_base {
 
 sub _link_chunk_croak {
     my ($sec, $off) = @_;
-    croak "offset is required for linking"
+    _die "offset is required for linking"
         unless defined $off;
-    croak "section is required for linking"
+    _die "section is required for linking"
         unless defined $sec;
 }
 
@@ -916,7 +964,7 @@ sub _link_chunk {
         for my $o (sort { $a <=> $b } keys %{$c->{link_rel}}) {
             my $ref = $c->{link_rel}{$o};
             my ($sym, $delta) = _split_ref($ref);
-            croak "undefined reference $ref"
+            _die "undefined reference $ref"
                 unless defined $ctx->{symbol_offset}{$sym};
             if ($ctx->{symbol_section}{$sym} eq $sec) {    # inter-section
                 substr($c->{bytes}, $o, 4) = pack("V",
@@ -932,7 +980,7 @@ sub _link_chunk {
         for my $o (sort { $a <=> $b } keys %{$c->{link_abs}}) {
             my $ref = $c->{link_abs}{$o};
             my ($sym, $delta) = _split_ref($ref);
-            croak "undefined reference $ref"
+            _die "undefined reference $ref"
                 unless exists $ctx->{symbol_offset}{$sym};
             $ctx->{reloc_abs}{$sec}{ $o + $off } = $ref;
             substr($c->{bytes}, $o, 4) = pack("V",
@@ -959,16 +1007,9 @@ sub _save {
     for my $src (sort keys %{$ctx->{source_output_file}}) {
         my $f = $ctx->{source_output_file}{$src};
         next unless defined $f;
-        croak "error saving $f: nothing got patched\n"
+        _die "error saving $f: nothing got patched\n"
             unless defined $ctx->{source_bytes}{$src};
-        write_file(
-            $f,
-            {
-                binmode  => ":raw",
-                err_mode => "carp",
-            },
-            $ctx->{source_bytes}{$src}
-        );
+        write_file($f, { binmode => ":raw" }, $ctx->{source_bytes}{$src});
         print "written $f\n";
     }
 }
@@ -977,7 +1018,7 @@ sub _save {
 sub _wrap {
     my $n = shift;
 
-    croak "integer expected, got " . tt($n)
+    _die "integer expected, got " . tt($n)
         unless defined $n
         and ref($n) eq ""
         and $n =~ /^[-+]?\d+/;
@@ -1004,7 +1045,7 @@ sub pp {
 
 sub _die_args {
     my ($func, $arg_template, @args) = @_;
-    croak "$func requires even number of arguments"
+    _die "$func requires even number of arguments"
         if @args % 2 == 1;
 
     # TODO arg template
@@ -1021,11 +1062,11 @@ sub _hexdump {
 sub _pack_hex {
     my ($xbytes) = @_;
 
-    croak "error: bad symbols in hex dump: $1"
+    _die "error: bad symbols in hex dump: $1"
         if $xbytes =~ /([^0-9a-fA-F\s].*)$/;
 
     $xbytes =~ s/\s//g;
-    croak "error: odd number of symbols in hex dump: $xbytes"
+    _die "error: odd number of symbols in hex dump: $xbytes"
         if length($xbytes) % 2;
 
     return pack("H*", $xbytes);
@@ -1072,7 +1113,7 @@ sub _parse_objdump {
     my @contents = $out =~ /(^Contents of section.*:\n(?: [0-9a-f].*\n)*)/mg;
     for my $c (@contents) {
         my ($cheader, @clines) = split /\n/, $c;
-        croak "bad contents section header: $cheader"
+        _die "bad contents section header: $cheader"
             unless $cheader =~ /^Contents of section (.*):$/;
         my $sname = $1;
 
@@ -1080,11 +1121,11 @@ sub _parse_objdump {
             unless exists $sbytes{$sname};
 
         for my $cline (@clines) {
-            croak "bad line: $cline"
+            _die "bad line: $cline"
                 unless $cline =~
                 /^ ([0-9a-f]+) ((?:(?:[0-9a-f]{2}){1,4} ){1,4}) .*/;
             my ($off, $xbytes) = ($1, $2);
-            croak "parse error, offset does not match bytes count at $off: $c"
+            _die "parse error, offset does not match bytes count at $off: $c"
                 unless hex $off == length $sbytes{$sname};
             $sbytes{$sname} .= _pack_hex($xbytes);
         }
@@ -1103,7 +1144,7 @@ sub _parse_objdump {
         $sbytes{$sname} = "\0" x $ssize{$sname}
             if $sname eq ".bss";
 
-        croak "section size $ssize{$sname} does not match binary chunk size "
+        _die "section size $ssize{$sname} does not match binary chunk size "
             . length($sbytes{$sname})
             unless $ssize{$sname} eq length($sbytes{$sname});
 
@@ -1122,7 +1163,7 @@ sub _parse_objdump {
     for my $sl (split /\n/, $symbols) {
         my ($off, $sname, $sym) = $sl =~ /^([0-9a-f]+) g.{7}(\S+)\s+\S+\s+(.*)/;
         next unless defined $sym;
-        croak "unknown section $sname referenced: $symbols "
+        _die "unknown section $sname referenced: $symbols "
             unless exists $soff{$sname};
         $globals{$sym} = $soff{$sname} + hex($off);
     }
@@ -1134,18 +1175,18 @@ sub _parse_objdump {
     my %link_abs;
     my %link_self;
     for my $r (@relocs) {
-        croak "bad relocation listing: $r"
+        _die "bad relocation listing: $r"
             unless $r =~ /^RELOCATION RECORDS FOR \[(.*)\]:\n.*\n((?:.*\n)*)$/;
         my ($sname, $rlist) = ($1, $2);
         next unless exists $sbytes{$sname};
 
         for my $rline (split /\n/, $rlist) {
-            croak "bad relocation line: $rline"
+            _die "bad relocation line: $rline"
                 unless $rline =~ /^([0-9a-f]+) (\S+) +(.*)$/;
             my ($roff, $rtype, $symb) =
                 (hex($1) + $soff{$sname}, $2, $3);
 
-            croak "relocation mentions unknown section $symb: $rline"
+            _die "relocation mentions unknown section $symb: $rline"
                 if $symb =~ /^\./ and not exists $soff{$symb};
 
             if ($rtype eq "R_386_32") {
@@ -1174,7 +1215,7 @@ sub _parse_objdump {
                 $link_rel{$roff} = $symb . _unpack_delta($bytes, $roff);
                 next;
             }
-            croak "unknown reloc type $rtype";
+            _die "unknown reloc type $rtype";
         }
     }
 
@@ -1212,7 +1253,7 @@ sub _objdump {
 
     my ($out, $err);
     IPC::Run::run [ qw/ objdump -sxw /, $objf ], ">", \$out, "2>", \$err
-        or croak "objdump error: $err";
+        or _die "objdump error: $err";
 
     my $res = _eval_rethrow(sub { _parse_objdump($out, $opts); },
         "_parse_objdump", $out);
@@ -1223,7 +1264,7 @@ sub _objdump {
     if ($ctx->{settings}{need_listing}) {
         IPC::Run::run [ qw/ objdump -dr --insn-width=8 -Mintel /, $objf ],
             ">", \$out, "2>", \$err
-            or croak "objdump error: $err";
+            or _die "objdump error: $err";
         $res->{listing} = $out;
     }
 
@@ -1235,18 +1276,18 @@ sub _croak_source {
     my ($where, $code, $out) = @_;
     my $i = 1;
     $code =~ s/^/$i++." "/meg;
-    croak "$where\n$code\nerror was: $out\n";
+    _die "$where\n$code\nerror was: $out\n";
 }
 
 
 sub gcc {
     my ($code, $opts) = @_;
 
-    croak "scalar with C code expected as first argument, got ", tt($code)
+    _die "scalar with C code expected as first argument, got ", tt($code)
         if defined $code and ref($code) ne "";
 
     $opts //= {};
-    croak "opts hash ref expected as second argument, got ", tt($opts)
+    _die "opts hash ref expected as second argument, got ", tt($opts)
         unless ref($opts) eq "HASH";
 
     my $out;
@@ -1272,11 +1313,11 @@ sub gcc {
 sub gas {
     my ($code, $opts) = @_;
 
-    croak "scalar with assembly listing expected, got ", tt($code)
+    _die "scalar with assembly listing expected, got ", tt($code)
         unless defined $code and ref($code) eq "";
 
     $opts //= {};
-    croak "opts hash ref expected as second argument, got ", tt($opts)
+    _die "opts hash ref expected as second argument, got ", tt($opts)
         unless ref($opts) eq "HASH";
 
     # use intel syntax by default
@@ -1299,7 +1340,7 @@ sub gas {
 sub build_chunk {
     my ($c) = @_;
 
-    croak "undef chunk to build"
+    _die "undef chunk to build"
         unless defined $c;
 
     my $node = $c;
@@ -1321,10 +1362,10 @@ sub build_chunk {
     return $node
         if defined $node->{bytes};
 
-    croak "no bytes and bad source: ", tt($node->{source})
+    _die "no bytes and bad source: ", tt($node->{source})
         unless defined $node->{source} and ref($node->{source}) eq "";
 
-    croak "bad format field: ", tt($node->{format})
+    _die "bad format field: ", tt($node->{format})
         unless defined $node->{format} and ref($node->{format}) eq "";
 
     $node->{bytes} = _pack_hex($node->{source}), return $node
@@ -1339,7 +1380,7 @@ sub build_chunk {
     return { %$node, %{ gcc($node->{source}, $node->{opts}) } }
         if $node->{format} eq "gcc";
 
-    croak "unknown format $node->{format}";
+    _die "unknown format $node->{format}";
 }
 
 
@@ -1351,9 +1392,12 @@ sub _eval_rethrow {
         unless $@;
 
     my $inf = ss(@info);
-    $inf =~ s/^/    /m;
+    $inf =~ s/^/    /mg;
 
-    die "$where, args were:\n$inf\n  error: $@";
+    my $err = $@;
+    $err = "error: $@" unless $@ =~ /^error:/;
+
+    _die "$where, args were:\n$inf\n$err";
 }
 
 1;
