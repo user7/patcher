@@ -32,6 +32,8 @@ sub common_settings {
         patches               => [],
         reloc_rel             => {},
         reloc_abs             => {},
+        build_cache           => {},
+        build_cache_usage     => {},
     );
 }
 

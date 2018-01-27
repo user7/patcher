@@ -7,6 +7,7 @@ use Data::Dumper;
 use File::Temp;
 use File::Slurp;
 use IPC::Run;
+use Storable qw(freeze thaw);
 
 # perl export magic
 require Exporter;
@@ -64,6 +65,8 @@ sub reset_context {
         patches               => [],
         reloc_rel             => {},
         reloc_abs             => {},
+        build_cache           => {},
+        build_cache_usage     => {},
     };
 
     modify_context(@_);
@@ -328,6 +331,38 @@ sub link_apply_save {
     save();
 }
 
+
+sub build_cache_load {
+    my $f = $ctx->{settings}{build_cache_file};
+    return unless $f;
+    unless (-f $f) {
+        print "cache file '$f' does not exist\n";
+        return;
+    }
+    eval {
+        my $data = read_file($f, { binmode => ":raw" });
+        $ctx->{build_cache} = thaw $data;
+    };
+    if ($@) {
+        print "cache not loaded: $@\n";
+    } else {
+        print "cache loaded from '$f'\n";
+    }
+}
+
+
+sub build_cache_save {
+    my $f = $ctx->{settings}{build_cache_file};
+    return unless $f;
+    return unless $ctx->{build_cache};
+    for my $i (keys %{$ctx->{build_cache}}) {
+        delete $ctx->{build_cache}{$i}
+            unless $ctx->{build_cache_usage}{$i};
+    }
+    my $data = freeze($ctx->{build_cache});
+    write_file $f, { binmode => ":raw" }, $data;
+}
+
 #
 # ------
 #  aux
@@ -472,11 +507,26 @@ sub _check_filter {
 sub _patch {
     my $p = shift;
     _update_offsets($p);
+
+    # TODO whole 'topic' thing is messy and needs refactoring,
+    # make them independent, make them store docs
+    if (defined $p->{topic}) {
+        $ctx->{topic} = $p->{topic};
+    } else {
+        $p->{topic} = $ctx->{topic}
+            if defined $ctx->{topic};
+    }
+
+    my $bctx = {};
+    $bctx->{label} = "'" . ($p->{topic} // "") . ' | ' . $p->{desc} . "'"
+        unless $ctx->{settings}{quiet};
+    $bctx->{nocache} = 1 if $p->{nocache};
+
     if (defined $p->{cchunk}) {
         _die "off is not defined, cchunk makes no sense"
             unless defined $p->{off};
 
-        $p->{cchunk} = build_chunk($p->{cchunk});
+        $p->{cchunk} = build_chunk($p->{cchunk}, $bctx);
         _die "empty cchunk makes no sense"
             if length $p->{cchunk}{bytes} == 0;
     } else {
@@ -485,7 +535,7 @@ sub _patch {
     }
 
     if (defined $p->{pchunk}) {
-        $p->{pchunk} = build_chunk($p->{pchunk});
+        $p->{pchunk} = build_chunk($p->{pchunk}, $bctx);
     } else {
         $p->{pchunk} = build_chunk("", { nocache => 1 }) if $p->{fill_nop};
     }
@@ -514,16 +564,7 @@ sub _patch {
             if length($p->{pchunk}{bytes}) < length($p->{cchunk}{bytes});
     }
 
-    # TODO whole 'topic' thing is messy and needs refactoring,
-    # make them independent, make them store docs
-    if (defined $p->{topic}) {
-        $ctx->{topic} = $p->{topic};
-    } else {
-        $p->{topic} = $ctx->{topic}
-            if defined $ctx->{topic};
-    }
     return unless _check_filter($p);
-
     push(@{$ctx->{patches}}, $p);
 }
 
@@ -1386,6 +1427,34 @@ sub gas {
 
 
 sub build_chunk {
+    my ($c, $bctx) = @_;
+    _die "undef chunk to build"
+        unless defined $c;
+
+    my $key;
+    goto rebuild unless $ctx->{build_cache};
+    goto rebuild if $bctx and $ctx->{nocache};
+    goto rebuild if ref($c) eq '' and $c =~ /^(##|[^#])/;    # raw chunk
+
+    $Storable::canonical = 1;
+    $key                 = freeze(\$c);
+    $Storable::canonical = 0;
+
+    $ctx->{build_cache_usage}{$key}++, return thaw($ctx->{build_cache}{$key})
+        if exists $ctx->{build_cache}{$key};
+
+    print("building $bctx->{label}\n"), delete $bctx->{label}
+        if $bctx and exists $bctx->{label};
+
+rebuild:
+    my $res = _build_chunk($c);
+    $ctx->{build_cache}{$key} = freeze($res), $ctx->{build_cache_usage}{$key}++
+        if defined $key;
+    return $res;
+}
+
+
+sub _build_chunk {
     my ($c) = @_;
 
     _die "undef chunk to build"

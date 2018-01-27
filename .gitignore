@@ -3,3 +3,4 @@ run
 tags
 *.xxd
 *.swp
+.patcher-cache
