@@ -1,7 +1,7 @@
 use warnings;
 use strict;
 
-use Test::Most tests => 53;
+use Test::Most tests => 52;
 use Test::Most;
 use Test::Deep;
 use FindBin;
@@ -802,100 +802,6 @@ eval_test(
     },
     compare => "68 05 00 00 00 68 00 00 00 00 ",
 );
-
-# the final boss of a test
-{
-    my $file_header = Patcher::_pack_hex("112233");
-
-    my $text_off   = length $file_header;
-    my $text_len   = 0x1000;
-    my $text_vbase = 0;
-
-    my $data_off   = $text_off + $text_len;
-    my $data_len   = 0x500;
-    my $data_vbase = 0x1000;
-
-    my $default_off = 0x20000;
-    my $actual_off  = 0x30000;
-
-    my $var_ref_dseg = 4;               # in .text
-    my $var_ref_off  = $var_ref_dseg;
-
-    my $var_loc_dseg   = 8;                                           # in .data
-    my $var_loc_actual = $data_vbase + $actual_off + $var_loc_dseg;
-
-    my $pspace_off = 16;
-    my $pspace_len = $text_len - $pspace_off;
-
-    my $var44_dseg = 0x44;                                            # in .data
-
-    my $sbytes = $file_header . "\0" x ($text_len + $data_len);
-    eval_test(
-        "relocator",
-        sub {
-            Patcher::modify_context(
-                source_bytes          => { s       => $sbytes },
-                section_source        => { ".text" => "s" },
-                section_pspace_offset => { ".text" => $pspace_off },
-                section_pspace_length => { ".text" => $pspace_len },
-                section_base          => {
-                    ".text" => $text_vbase + $default_off,
-                    ".data" => $data_vbase + $default_off,
-                },
-                section_offset => {
-                    ".text" => $text_off,
-                    ".data" => $data_off,
-                },
-                "settings relocator"                => "r",
-                "settings mimic_relocated_pointers" => 1,
-
-                # "settings deduce_section" => 1,
-                data_bootstrap_ptr => $text_off + $var_ref_dseg,
-                data_bootstrap_var => $data_off + $var_loc_dseg,
-            );
-            Patcher::patch(
-                desc    => "add fake bootstrap",
-                pchunk  => "#gas# .int $var_loc_actual",
-                off     => $var_ref_off,
-                section => ".text",
-            );
-            Patcher::patch(
-                desc    => "add push self",
-                pchunk  => "#gas# msg: push offset msg + 4",
-                section => ".text",
-            );
-            Patcher::add_symbol(
-                section => ".data",
-                name    => "var44",
-                off     => $var44_dseg
-            );
-            Patcher::patch(
-                desc    => "add push var44",
-                pchunk  => "#gas# push offset var44",
-                section => ".text",
-            );
-            Patcher::link_apply_save();
-
-            # diag($Patcher::ctx->{patches}[-1]{pchunk}{listing});
-            my $x = Patcher::_hexdump($Patcher::ctx->{source_bytes}{s});
-            $x =~ s/(00 ){10,}//g;
-            return $x;
-        },
-        compare => re(
-            "11 22 33 "                # header
-                . "00 " x 4            # skip till var_ref_dseg
-                . "08 10 03 00 "       # pointer to var_loc_actual
-                . "00 " x 8            # skip before pspace
-                . "68 14 00 02 00 "    # push pointer to itself + 4
-                . "68 44 10 02 00 "    # push pointer to var44 in .data
-                . ".* c3 "             # relocator
-                . "11 00 00 00 "       # relocation at .text+0x11
-                . "14 00 00 00 "       #  referring to .text+0x14
-                . "16 00 00 00 "       # relocation at .text+0x15
-                . "44 "                #  referring to .data+0x44
-        ),
-    );
-}
 
 # TODO big section check before apply
 # TODO multiple sections

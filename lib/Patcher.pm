@@ -761,140 +761,6 @@ sub _create_virtual_sections {
 }
 
 
-sub _add_relocator_dummy {
-    my $rname = $ctx->{settings}{relocator};
-    return unless defined $rname;
-    patch(
-        desc   => "add dummy $rname",
-        pchunk => {
-            bytes   => "",
-            globals => { $rname => 0 },
-        },
-        section => ".text",
-    );
-}
-
-
-sub _add_relocator {
-    my $rname = $ctx->{settings}{relocator};
-    return
-        unless defined $rname;
-
-    _die "unable to produce relocator without data_bootstrap_ptr"
-        unless defined $ctx->{data_bootstrap_ptr};
-
-    _die "unable to produce relocator without data_bootstrap_var"
-        unless defined $ctx->{data_bootstrap_var};
-
-    my %sec_offset;
-    $sec_offset{$_} = $ctx->{section_offset}{$_} // 0 for (qw/ .text .data /);
-
-    my %relocs = (
-        ".text" => "",
-        ".data" => "",
-    );
-    my $text_relocs = "";
-    my $data_relocs = "";
-
-    _die "cross-section relative relocations are not supported"
-        if keys %{$ctx->{reloc_rel}};
-
-    my @rk = keys %{$ctx->{reloc_abs}};
-    _die "relocations outside of .text are not supported"
-        unless @rk < 2 and (@rk == 1 ? $rk[0] eq ".text" : 1);
-
-    my $rr = $ctx->{reloc_abs}{".text"};
-    for my $off (sort { $a <=> $b } keys %$rr) {
-        my $ref = $rr->{$off};
-        my ($sym, $delta) = _split_ref($ref);
-        my $sec = $ctx->{symbol_section}{$sym};
-        _die "symbol $sym+$delta has no section defined"
-            unless defined $sec;
-        my $var_dsec = $ctx->{symbol_offset}{$sym} + $delta;
-        my $rel_dsec = $off;
-        my $item     = sprintf("       .int 0x%x, 0x%x\n",
-            _wrap($rel_dsec), _wrap($var_dsec));
-
-        # print "# reloc $sec $ref: $item";    # if $sec eq ".data";
-        $relocs{$sec} .= $item;
-    }
-
-    _die "no symbol $rname defined"
-        unless defined $ctx->{symbol_offset}{$rname};
-
-    my $relocator_dsec =
-        $ctx->{symbol_offset}{$rname} - $sec_offset{".text"};
-    my $bootstrap_ptr_dsec = $ctx->{data_bootstrap_ptr} - $sec_offset{".text"};
-    my $bootstrap_var_dsec = $ctx->{data_bootstrap_var} - $sec_offset{".data"};
-
-    my $chunk = gas("
-        start:
-            push    eax
-            push    ebx
-            push    ecx
-            push    edx
-            push    esi
-            push    edi
-            push    ebp
-            call    get_retaddr
-
-        retaddr:
-            lea     esi, [ eax - (retaddr - start) ]
-
-            lea     eax, [ esi + (relocs_text - start) ]
-            lea     ebx, [ esi + (relocs_data - start) ]
-            lea     ecx, [ esi - $relocator_dsec ]
-            mov     edx, ecx
-            call    apply_table
-
-            mov     eax, ebx
-            lea     ebx, [ esi + (relocs_data_end - start) ]
-            mov     edx, [ esi - $relocator_dsec + $bootstrap_ptr_dsec ]
-            sub     edx, $bootstrap_var_dsec
-            call    apply_table
-
-            pop     ebp
-            pop     edi
-            pop     esi
-            pop     edx
-            pop     ecx
-            pop     ebx
-            pop     eax
-            ret
-
-        apply_table_loop:
-            mov     edi, [ eax ]
-            mov     ebp, [ eax + 4 ]
-            add     ebp, edx
-            mov     [ edi + ecx ], ebp
-            add     eax, 8
-        apply_table:
-            cmp     eax, ebx
-            jl      apply_table_loop
-            ret
-
-        get_retaddr:
-            mov     eax, [ esp ]
-            ret
-
-        relocs_text:
-" . $relocs{".text"} . "
-        relocs_data:
-" . $relocs{".data"} . "
-        relocs_data_end:
-    ");
-
-    patch(
-        desc    => "add $rname",
-        pchunk  => $chunk,
-        symbol  => $rname,
-        section => ".text",
-    );
-
-    _place_patch($ctx->{patches}[-1]);
-}
-
-
 sub _check_patch {
     my $p = shift;
 
@@ -941,8 +807,6 @@ sub link_patches {
     print "linking patches\n"
         unless $ctx->{settings}{quiet};
 
-    _add_relocator_dummy();
-
     for my $p (@{ $ctx->{patches} }) {
         _eval_rethrow(
             sub {
@@ -971,7 +835,6 @@ sub link_patches {
         }
     }
 
-    _add_relocator();
     _check_placement();
     _create_virtual_sections();
     _produce_reloc_chunk();
