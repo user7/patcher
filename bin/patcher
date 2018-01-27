@@ -2,138 +2,51 @@
 
 use FindBin;
 use lib "$FindBin::Bin/../lib";
-use Patcher qw/ modify_context load_config /;
+use Patcher;
 use Getopt::Long;
-use File::Copy;
 use File::Slurp;
-use Carp qw/ verbose croak /;
 
-my $input = "j/input.exe";
-my @output;
-my @renames;
-my @digest;
-my @example;
-my @build;
-my @bin;
-
-
-sub set_context {
-    my ($opt, $set) = @_;
-    my ($k, $v, @rest) = split(/=/, $set);
-    die "you must specify key=value for --set-context"
-        if not defined $v or @rest;
-    modify_context($k => $v);
-}
-
+my @a;
 GetOptions(
-    "i|input=s"          => \$input,
-    "o|output=s"         => \@output,
-    "r|renames=s"        => \@renames,
-    "d|digest=s"         => \@digest,
-    "x|config-example=s" => \@example,
-    "b|build-example=s"  => \@build,
-    "n|bin=s"            => \@bin,
-    "set-context=s"      => \&set_context,
+    "define|d=s" => sub {
+        my ($opt, $set) = @_;
+        die "you must specify key=value for $opt"
+            unless $set =~ /^([^=]*)=(.*)/;
+        push(@a, [ def => $1, $2 ]);
+    },
+    "<>" => sub {
+        push(@a, [ load => $_[0] ]);
+    },
 ) or die "bad commad line arguments";
 
-if (defined $input) {
-    die "no such file $input"
-        unless -f $input;
-    modify_context("source_input_file exe" => $input);
-}
+eval {
+    for my $a (@a) {
+        if ($a->[0] eq 'def') {
+            shift @$a;
+            Patcher::modify_context(@$a);
+            next;
+        }
+        if ($a->[0] eq 'load') {
+            shift @$a;
+            Patcher::load_config(@$a);
+            next;
+        }
+        Patcher::_die "unknown action type '$a->[0]'";
+    }
+};
 
-my $o;
-if (@output) {
-    $o = shift @output;
-    modify_context("source_output_file exe" => $o);
-}
-
-modify_context(config_example => $example[0])
-    if @example;
-
-load_config(@ARGV);
-
-Patcher::apply_and_save();
-
-
-sub write_file_aux {
-    my ($f, $d) = @_;
-    write_file($f, $d);
-    print "written $f\n";
-}
-
-
-sub copy_all {
-    my ($f, @to) = @_;
-    for my $t (@to) {
-        print "copy $f $t\n";
-        copy($f, $t);
+sub any_key {
+    my $err = shift;
+    if ($^O =~ /Win/) {
+        print "$err\n" if $err;
+        print "press any key to continue..\n";
+        getc;
     }
 }
 
-if (@bin) {
-    my $desc = $Patcher::ctx->{bin_desc_bytes} // "";
-    my $relocs = $Patcher::ctx->{reloc_chunk_bytes};
-    croak "reloc chunk does not exist"
-        unless defined $relocs;
-
-    my $code = $Patcher::ctx->{source_bytes}{bin};
-    croak "no bin code is built"
-        unless defined $code;
-
-    my $header = pack(
-        "VVV",
-        length($desc) + length($relocs) + length($code),    #
-        length($desc),
-        length($desc) + length($relocs),
-    );
-    my $data = $header . $desc . $relocs . $code;
-    write_file_aux($bin[0], $data);
-    copy_all(@bin);
+if ($@) {
+    $| = 1;
+    any_key($@);
+    die $@;
 }
-
-copy_all($o, @output);
-
-if (@digest) {
-    modify_context(
-        "settings truncate_long_dumps"      => 100,
-        "settings off_name_enclosing_scope" => 1,
-    );
-    Patcher::print_patches($digest[0]);
-    copy_all(@digest);
-}
-
-
-sub put_generated_file {
-    my ($desc, $item, @files) = @_;
-    return unless @files;
-    my $r = Patcher::context_get(qw/ conf_gen generated /, $item);
-    croak "no conf_gen generated $item in patcher context"
-        unless defined $r;
-    write_file_aux($files[0], $r);
-    copy_all(@files);
-}
-
-put_generated_file("config example",     "config_example", @example);
-put_generated_file("build list example", "build_example",  @build);
-
-# TODO: redo in IDC
-if (@renames) {
-    my $out    = "";
-    my %adjust = (
-        ".text" => $Patcher::ctx->{section_base}{".text"},
-        ".data" => $Patcher::ctx->{section_base}{".data"},
-    );
-    my $offs = $Patcher::ctx->{symbol_offset};
-    for my $sym (sort { $offs->{$a} <=> $offs->{$b} } keys %$offs) {
-        my $sec = $Patcher::ctx->{symbol_section}{$sym};
-        next unless exists $adjust{$sec};
-        my $off = $offs->{$sym} + $adjust{$sec};
-        $out .= sprintf "MakeName(0x%x, '%s_%x');\n", $off, $sym, $off
-            if $sec and $off > 0;
-    }
-    $out .= "SaveBase(\"\");\n";
-    $out .= "Exit(0);\n";
-    write_file_aux($renames[0], $out);
-    copy_all(@renames);
-}
+any_key();
