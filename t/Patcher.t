@@ -11,7 +11,6 @@ $SIG{PIPE} = 'ignore';    # for watch
 
 use_ok("Patcher");
 
-
 sub common_settings {
     return (
         settings => {
@@ -274,11 +273,11 @@ eval_test(
     sub {
         _unpack_deep Patcher::gas("call print");
     },
-    compare => {
-        %$obj_common,
-        bytes    => "e8 fc ff ff ff ",
-        link_rel => { 1 => "print-4", },
-    },
+    compare => superhashof(
+        {
+            %$obj_common, link_rel => { 1 => "print-4", },
+        }
+    ),
 );
 
 eval_test(
@@ -327,18 +326,16 @@ eval_test(
                 foo:
         ");
     },
-    compare => { %$obj_common, bytes => "e8 01 00 00 00 99 " },
+    compare => { %$obj_common, bytes => re("^e8 01 00 00 00 99 (00 )*") },
 );
 
 # gcc tests
 eval_test(
     "gcc",
     sub {
-        _unpack_deep Patcher::gcc("");
+        Patcher::gcc("")->{bytes};
     },
-    compare => {
-        %$obj_common, bytes => "",
-    },
+    compare => "",
 );
 
 eval_test(
@@ -379,9 +376,9 @@ eval_test(
     },
     compare => {
         %$obj_common,
-        bytes    => "e9 fc ff ff ff ",    # optimizer turns call to jump, no ret
+        bytes => re("e9 .. .. .. .. "),   # optimizer turns call to jump, no ret
         link_rel => { 1 => "foo-4" },
-        globals  => { bar => 0 },
+        globals => { bar => 0 },
     },
 );
 
@@ -399,7 +396,7 @@ eval_test(
     },
     compare => {
         %$obj_common,
-        bytes     => "c7 05 00 00 00 00 00 00 00 00 c3 39 00 ",
+        bytes     => re("c7 05 00 00 00 00 00 00 00 00 c3 39 (00 )*"),
         link_self => { 6 => 11 },
         link_abs  => { 2 => 'var' },
         globals   => { bar => 0 },
@@ -598,7 +595,7 @@ eval_test(
             section => ".text",
 
         );
-        Patcher::apply_and_save();
+        Patcher::link_apply_save();
     },
     compare => ignore
 );
@@ -623,7 +620,7 @@ eval_test(
             off     => 1,
             section => ".text",
         );
-        Patcher::apply_and_save();
+        Patcher::link_apply_save();
     },
     catch => qr/patches '1' and '2' intersect/,
 );
@@ -637,7 +634,7 @@ eval_test(
             pchunk   => "",
             fill_nop => 1,
         );
-        Patcher::apply_and_save();
+        Patcher::link_apply_save();
         unpack("H*", $Patcher::ctx->{input_bytes});
     },
     catch => qr/no cchunk present/,
@@ -656,7 +653,7 @@ eval_test(
             fill_nop => 1,
             section  => ".text",
         );
-        Patcher::apply_and_save();
+        Patcher::link_apply_save();
         unpack("H*", $Patcher::ctx->{source_bytes}{s});
     },
     compare => "419043",
@@ -674,7 +671,7 @@ eval_test(
             fill_nop => 1,
             pchunk   => "00",
         );
-        Patcher::apply_and_save();
+        Patcher::link_apply_save();
         unpack("H*", $Patcher::ctx->{source_bytes}{s});
     },
     compare => "410090",
@@ -690,7 +687,7 @@ eval_test(
             cchunk => "aa bb",
             off    => 2,
         );
-        Patcher::apply_and_save();
+        Patcher::link_apply_save();
     },
     catch => qr/attempt to check range not within source/,
 );
@@ -705,7 +702,7 @@ eval_test(
             pchunk => "cc dd",
             off    => 0,
         );
-        Patcher::apply_and_save();
+        Patcher::link_apply_save();
     },
     catch => qr/cchunk ends before pchunk/,
 );
@@ -721,7 +718,7 @@ eval_test(
             pchunk  => "aa",
             section => ".text",
         );
-        Patcher::apply_and_save();
+        Patcher::link_apply_save();
         Patcher::_hexdump($Patcher::ctx->{source_bytes}{s});
     },
     catch => qr/unable to place '.*', no pspace/,
@@ -740,7 +737,7 @@ eval_test(
             pchunk  => "aa bb cc",
             section => ".text",
         );
-        Patcher::apply_and_save();
+        Patcher::link_apply_save();
         Patcher::_hexdump($Patcher::ctx->{source_bytes}{s});
     },
     catch => qr/no free patch space left for patch/,
@@ -768,7 +765,7 @@ eval_test(
             name    => "bar",
             section => ".text",
         );
-        Patcher::apply_and_save();
+        Patcher::link_apply_save();
         Patcher::_hexdump($Patcher::ctx->{source_bytes}{s});
     },
     compare => "e8 00 00 00 00 e8 f6 ff ff ff ",
@@ -797,7 +794,7 @@ eval_test(
             name    => "bar",
             section => ".text",
         );
-        Patcher::apply_and_save();
+        Patcher::link_apply_save();
         Patcher::_hexdump($Patcher::ctx->{source_bytes}{s});
     },
     compare => "68 05 00 00 00 68 00 00 00 00 ",
@@ -873,7 +870,7 @@ eval_test(
                 pchunk  => "#gas# push offset var44",
                 section => ".text",
             );
-            Patcher::apply_and_save();
+            Patcher::link_apply_save();
 
             # diag($Patcher::ctx->{patches}[-1]{pchunk}{listing});
             my $x = Patcher::_hexdump($Patcher::ctx->{source_bytes}{s});

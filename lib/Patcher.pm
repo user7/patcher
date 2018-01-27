@@ -160,27 +160,8 @@ sub patch {
 }
 
 
-sub apply_and_save {
-    _prepare_patches();
-    _apply_patches();
-
-    print_patches()
-        unless $ctx->{settings}{quiet};
-
-    _save();
-}
-
-
-sub print_patches {
-    my $file = shift;
-    my $fh;
-    if ($file) {
-        open $fh, ">", $file
-            or _die "unable to open $file: $!";
-    } else {
-        $fh = *STDOUT{IO};
-    }
-
+sub generate_digest {
+    my $out = "";
     for my $p (@{ $ctx->{patches} }) {
         next
             unless defined $p->{pchunk} and length $p->{pchunk}{bytes} > 0;
@@ -204,12 +185,10 @@ sub print_patches {
         my $add = "";
         $add .= "... (" . length($pbin) . " bytes)"
             if length $b < length $pbin;
-        printf $fh "patch %s '%s%s'%s: %s\n", $at, $topic, $p->{desc},
+        $out .= sprintf "patch %s '%s%s'%s: %s\n", $at, $topic, $p->{desc},
             $sym_name, _hexdump($b) . $add;
     }
-
-    close $fh
-        if $file;
+    return $out;
 }
 
 
@@ -222,43 +201,61 @@ sub find_symbol {
     }
     return "" unless defined $off and defined $sec;
 
-    my $nearest_sym;
-    my $nearest_sym_off;
-    for my $sym (sort keys %{$ctx->{symbol_offset}}) {
-        next
-            unless defined $ctx->{symbol_section}{$sym}
-            and $ctx->{symbol_section}{$sym} eq $sec;
-
+    my $index = $ctx->{symbol_index};
+    unless ($index) {
+        $index = {};
         my $ignore = $ctx->{settings}{find_offset}{ignore};
-        next
-            if ref($ignore) eq "Regexp" and $sym =~ $ignore;
+        _die "settings.find_offset.ignore is not a Regex"
+            if defined $ignore and ref($ignore) ne "Regexp";
 
-        my $sym_off = $ctx->{symbol_offset}{$sym};
-        next if $ctx->{symbol_offset}{$sym} > $off;
+        for my $sym (
+            sort {
+                my $soa = $ctx->{symbol_offset}{$a};
+                my $sob = $ctx->{symbol_offset}{$b};
+                $soa != $sob ? $soa <=> $sob : $a cmp $b;
+            }
+            keys %{$ctx->{symbol_offset}}
+            )
+        {
+            next if $ignore and $sym =~ $ignore;
 
-        next
-            if defined $nearest_sym and $nearest_sym_off > $sym_off;
+            my $ssec = $ctx->{symbol_section}{$sym};
+            next unless $ssec;
 
-        if ($sym_off == $off) {
-            next
-                if $ctx->{settings}{off_name_skip_zero_offsets};
-
-            return "$sym+0";
+            $index->{$ssec} //= [];
+            push(@{$index->{$ssec}}, [ $ctx->{symbol_offset}{$sym}, $sym ]);
         }
-
-        $nearest_sym     = $sym;
-        $nearest_sym_off = $sym_off;
+        $ctx->{symbol_index} = $index;
     }
 
-    return ""
-        unless defined $nearest_sym;
+    my $si = $index->{$sec};
+    return "" unless $si;
 
-    my $d    = $off - $nearest_sym_off;
+    my ($min, $max, $minv, $maxv) = (0, @$si - 1, $si->[0][0], $si->[-1][0]);
+    return "" if $minv > $off;
+    while (1) {
+        my $mid  = int(($max + $min) / 2);
+        my $midv = $si->[$mid][0];
+        my $change;
+
+        $min = $mid, $minv = $midv, $change = 1
+            if $min != $mid and $midv < $off;
+
+        $max = $mid, $maxv = $midv, $change = 1
+            if $max != $mid and $midv >= $off;
+
+        last unless $change;
+    }
+
+    if ($maxv == $off and $ctx->{settings}{off_name_skip_zero_offsets}) {
+        --$max;
+        return "" if $max < 0;
+        $maxv = $si->[$max][0];
+    }
+    my $d    = $off - $maxv;
     my $maxd = $ctx->{settings}{off_name_max_dist};
-    return ""
-        if defined $maxd and $d > $maxd;
-
-    return "$nearest_sym+$d";
+    return "" if defined $maxd and $d > $maxd;
+    return "$si->[$min][1]+$d";
 }
 
 
@@ -322,6 +319,13 @@ sub patch_divert_all {
         patch_divert($off, $old_target, $new_target);
         $off += 5;
     }
+}
+
+
+sub link_apply_save {
+    link_patches();
+    apply_patches();
+    save();
 }
 
 #
@@ -826,7 +830,10 @@ sub _apply_patch {
 }
 
 
-sub _prepare_patches {
+sub link_patches {
+    print "linking patches\n"
+        unless $ctx->{settings}{quiet};
+
     _add_relocator_dummy();
 
     for my $p (@{ $ctx->{patches} }) {
@@ -868,10 +875,11 @@ sub _prepare_patches {
     for my $p (@{ $ctx->{patches} }) {
         _eval_rethrow(sub { _check_patch($p) }, "_check_patch", $p);
     }
+    $ctx->{source_bytes}{digest} = generate_digest();
 }
 
 
-sub _apply_patches {
+sub apply_patches {
     for my $p (@{ $ctx->{patches} }) {
         _eval_rethrow(sub { _apply_patch($p) }, "_apply_patch", $p);
     }
@@ -1003,7 +1011,7 @@ sub _link_chunk {
 }
 
 
-sub _save {
+sub save {
     for my $src (sort keys %{$ctx->{source_output_file}}) {
         my $f = $ctx->{source_output_file}{$src};
         next unless defined $f;
@@ -1074,8 +1082,8 @@ sub _pack_hex {
 
 
 sub _unpack_delta {
-    my ($bytes, $roff) = @_;
-    my $d = unpack("V", substr($bytes, $roff, 4));
+    my ($bytes, $roff, $add) = @_;
+    my $d = unpack("V", substr($bytes, $roff, 4)) + $add;
     $d -= 2**32
         if $d >= 2**31;
     return $d == 0 ? "" : $d > 0 ? "+$d" : $d;
@@ -1085,26 +1093,29 @@ sub _unpack_delta {
 sub _parse_objdump {
     my ($out, $opts) = @_;
 
+    my $pe = $out =~ /file format pe-i386/s;
     my %salign;
     my %sbytes;
     my %ssize;
+    my %id_to_sname;
     my @sseq;
 
     # section list
     my ($sections) = $out =~ /^Sections:\nIdx.*\n((?: .*\n)*)/m;
     for my $sline (split /\n/, $sections) {
         my @items = split /\s+/, $sline;
-        my ($sname, $ssize, $salign) = @items[ 2, 3, 7 ];
+        my ($sid, $sname, $ssize, $salign) = @items[ 1, 2, 3, 7 ];
 
-        next unless $sname =~ /text|data|bss|slt|comment/;
+        next unless $sname =~ /^\.(text|rdata|rodata.*|data|bss|slt|comment)$/;
         next if $sname eq ".comment" and not $opts->{keep_comment};
 
         $salign{$sname} =
             $ctx->{settings}{honor_alignment}
             ? 2**($salign =~ s/^2\*\*//r)
             : 1;
-        $ssize{$sname}  = hex $ssize;
-        $sbytes{$sname} = "";
+        $ssize{$sname}     = hex $ssize;
+        $sbytes{$sname}    = "";
+        $id_to_sname{$sid} = $sname;
 
         push(@sseq, $sname);
     }
@@ -1128,6 +1139,13 @@ sub _parse_objdump {
             _die "parse error, offset does not match bytes count at $off: $c"
                 unless hex $off == length $sbytes{$sname};
             $sbytes{$sname} .= _pack_hex($xbytes);
+        }
+        if ($pe and $sname eq '.text') {
+            if ($sbytes{$sname} =~ /\x90+$/s) {
+                my $len = length($&);
+                substr($sbytes{$sname}, -$len) = '';
+                $ssize{$sname} -= $len;
+            }
         }
     }
 
@@ -1158,13 +1176,40 @@ sub _parse_objdump {
     }
 
     # extracting globals
-    my ($symbols) = $out =~ /^SYMBOL TABLE:\n((?:[0-9a-f].*\n)*)/m;
+    my ($symbols) = $out =~ /^SYMBOL TABLE:\n((?:\S.*\n)*)/m;
     my %globals;
     for my $sl (split /\n/, $symbols) {
-        my ($off, $sname, $sym) = $sl =~ /^([0-9a-f]+) g.{7}(\S+)\s+\S+\s+(.*)/;
-        next unless defined $sym;
-        _die "unknown section $sname referenced: $symbols "
-            unless exists $soff{$sname};
+        my ($off, $sname, $sym);
+        if ($pe) {
+            my ($sid, $scl, $nx);
+            ($sid, $scl, $nx, $off, $sym) =
+                $sl =~
+                /^\[\s*[0-9]+\]\(sec\s+([0-9]+)\)\(fl.*\)\(ty.*\)\(scl\s+(.*)\) \(nx\s+([0-9]+)\)\s+0x([0-9a-f]+)\s+(.*)/;
+            unless (defined $sym) {
+
+                # print "no match $sl\n";
+                next;
+            } else {
+
+                # print "match $sl\n";
+                # print "sid=$sid nx=$nx off=$off sym=$sym soff=$soff{$id_to_sname{$sid}}\n";
+            }
+
+            # next unless $nx == 1;
+            next if defined $soff{$sym};
+            next unless $scl == 2;
+            next unless $sid;
+            $sym =~ s/^_+//g;
+            $sname = $id_to_sname{ $sid - 1 };
+            _die "no section with id $sid"
+                unless $sname;
+        } else {
+            ($off, $sname, $sym) =
+                $sl =~ /^([0-9a-f]+) g.{7}(\S+)\s+\S+\s+(.*)/;
+            next unless defined $sym;
+            _die "unknown section $sname referenced: $symbols "
+                unless exists $soff{$sname};
+        }
         $globals{$sym} = $soff{$sname} + hex($off);
     }
 
@@ -1183,36 +1228,39 @@ sub _parse_objdump {
         for my $rline (split /\n/, $rlist) {
             _die "bad relocation line: $rline"
                 unless $rline =~ /^([0-9a-f]+) (\S+) +(.*)$/;
-            my ($roff, $rtype, $symb) =
+            my ($roff, $rtype, $sym) =
                 (hex($1) + $soff{$sname}, $2, $3);
 
-            _die "relocation mentions unknown section $symb: $rline"
-                if $symb =~ /^\./ and not exists $soff{$symb};
+            $sym =~ s/^_+//g;
 
-            if ($rtype eq "R_386_32") {
-                if ($symb =~ /^\./) {
+            _die "relocation mentions unknown section $sym: $rline"
+                if $sym =~ /^\./ and not exists $soff{$sym};
+
+            if ($rtype =~ /R_386_32|dir32/) {
+                if ($sym =~ /^\./) {
 
                     # offset from section boundary is embedded into instruction
                     $link_self{$roff} =
-                        unpack("V", substr($bytes, $roff, 4)) + $soff{$symb};
+                        unpack("V", substr($bytes, $roff, 4)) + $soff{$sym};
                     next;
                 }
 
-                $link_abs{$roff} = $symb . _unpack_delta($bytes, $roff);
+                $link_abs{$roff} = $sym . _unpack_delta($bytes, $roff, 0);
                 next;
             }
 
-            if ($rtype eq "R_386_PC32") {
-                if ($symb =~ /^\./) {
+            if ($rtype =~ /R_386_PC32|DISP32/) {
+                my $dfunc = $rtype eq "DISP32" ? -4 : 0;
+                if ($sym =~ /^\./) {
 
                     # offset from section boundary is embedded into instruction
-                    my $eo = unpack("V", substr($bytes, $roff, 4));
+                    my $eo = unpack("V", substr($bytes, $roff, 4)) + $dfunc;
                     substr($bytes, $roff, 4) =
-                        pack("V", $eo + $soff{$symb} - $roff);
+                        pack("V", $eo + $soff{$sym} - $roff);
                     next;
                 }
 
-                $link_rel{$roff} = $symb . _unpack_delta($bytes, $roff);
+                $link_rel{$roff} = $sym . _unpack_delta($bytes, $roff, $dfunc);
                 next;
             }
             _die "unknown reloc type $rtype";
