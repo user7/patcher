@@ -74,8 +74,9 @@ sub reset_context {
     return $ctx;
 }
 
-sub _die_args;
 sub _die;
+sub _die_args;
+sub _check_args_run;
 
 
 sub modify_context {
@@ -144,27 +145,45 @@ sub load_config {
 
 
 sub add_symbol {
-    _die_args("add_symbol", [@_]);
-    my $s = {@_};
-    _eval_rethrow(sub { _add_symbol($s) }, "add_symbol", $s);
+    _check_args_run("add_symbol", \&_add_symbol, [@_], {
+        name => 1,
+        off => 0,
+        section => 0,
+        off_section => 0,
+        source => 0,
+        off_source => 0,
+    });
 }
 
 
 sub add_alias_symbol {
-    _die_args("add_alias_symbol", [@_]);
-    my $s = {@_};
-    _eval_rethrow(sub { _add_alias_symbol($s) }, "add_alias_symbol", $s);
+    _check_args_run("add_alias_symbol", \&_add_alias_symbol, [@_], {
+        name => 1,
+        ref => 1,
+    });
 }
 
 
 sub patch {
-    _die_args("patch", [@_]);
-    my $p = {@_};
-    _eval_rethrow(sub { _patch($p) }, "patch", $p);
+    _check_args_run("patch", \&_patch, [@_], {
+        desc => 1,
+        cchunk => 0,
+        pchunk => 0,
+        fill_nop => 0,
+
+        name => 0,
+
+        off => 0,
+        section => 0,
+        off_section => 0,
+        source => 0,
+        off_source => 0,
+    });
 }
 
 
 sub generate_digest {
+    _die_args("generate_digest", [@_], {});
     my $out = "";
     for my $p (@{ $ctx->{patches} }) {
         next
@@ -269,8 +288,10 @@ sub find_symbol {
 
 
 sub topic {
-    die "topic must be a string or undef"
+    _die "topic must be a string"
         unless ref($_[0]) eq "";
+    _die "topic takes 1 argument"
+        if @_ != 1;
 
     $ctx->{topic} = $_[0];
 }
@@ -278,6 +299,10 @@ sub topic {
 
 sub patch_divert {
     my ($where, $from, $to, $op) = @_;
+    _die "patch_divert: first 3 arguments, offset, srouce and target, are required"
+        unless defined ($where // $from // $to);
+    _die "patch_divert takes 4 arguments max"
+        if @_ > 4;
     $op //= "call";
     patch(
         off    => $where,
@@ -294,6 +319,7 @@ sub patch_divert {
 # last moment, however diverts produced may overlap-clash with other patches.
 sub patch_divert_all {
     my ($sec, $old_target, $new_target) = @_;
+    _die "patch_divert_all takes 3 arguments" unless @_ == 3;
     return unless _check_filter({ topic => $ctx->{topic} // "" });
 
     _die "unknown section or not bound to source"
@@ -501,8 +527,6 @@ sub _update_offsets {
 sub _add_symbol {
     my $s = shift;
     my $n = $s->{name};
-    _die "name is required"
-        unless defined $n;
     _update_offsets($s);
     _die "section was not specified or deduced"
         unless defined $s->{section};
@@ -526,14 +550,7 @@ sub _add_symbol {
 
 
 sub _add_alias_symbol {
-    my $s = shift;
-    my $n = $s->{name};
-    _die "name is required"
-        unless defined $n;
-    my $r = $s->{ref};
-    _die "ref is required"
-        unless defined $r;
-
+    my ($n, $r) = ($_[0]->{name}, $_[0]->{ref});
     my $r0 = $ctx->{alias_symbol}{$n};
     _die "alias '$n' already refers to '$r0' != '$r'"
         if defined $r0 and $r0 ne $r;
@@ -556,9 +573,6 @@ sub _check_filter {
 sub _patch {
     my $p = shift;
     $p->{desc} //= $ctx->{settings}{default_desc};
-    _die "desc is required"
-        unless defined $p->{desc} and ref($p->{desc}) eq "";
-
     _update_offsets($p);
 
     # TODO whole 'topic' thing is messy and needs refactoring,
@@ -1083,16 +1097,34 @@ sub pp {
 
 
 sub _die_args {
-    my ($func, $args) = @_;
+    my ($func, $args, $template) = @_;
+    _die "$func takes no arguments"
+        if @$args > 0 and defined $template and scalar(keys %$template) == 0;
     _die "$func requires even number of arguments"
         if @$args % 2 == 1;
 
     my %x;
     for (my $i = 0 ; $i < @$args ; $i += 2) {
         my $k = $args->[$i];
-        _die "$func: duplicate key $k" if $x{$k};
+        _die "$func: duplicate key '$k'" if $x{$k};
+        _die "$func: unknown key '$k', expected one of: "
+                . join(", ", sort keys %$template)
+            if defined $template and not exists $template->{$k};
         $x{$k} = 1;
     }
+
+    if ($template) {
+        for my $k (keys %$template) {
+            _die "$func: $k is required" if $template->{$k} and not $x{$k};
+        }
+    }
+}
+
+
+sub _check_args_run {
+    my ($name, $func, $args, $template) = @_;
+    _die_args($name, $args, $template);
+    _eval_rethrow(sub { $func->({ @$args }) }, $name, $args );
 }
 
 
