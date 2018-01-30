@@ -1,0 +1,384 @@
+#!/usr/bin/env perl
+
+# Dos extender + LE executable is a popular format for old games. This script
+# parses such files to produce:
+#
+#   .json   -- LE structure in human readable form including relocations
+#   .mz     -- wrapped MZ executable (the one inside main MZ)
+#   .le     -- wrapped LE executable (the one inside wrapped MZ)
+#   .bin    -- source file with pointers relocated as if exe was loaded at
+#              address 0, suitable for loading in disassemblers which don't
+#              recognize LE structure. File is also padded by zeroes to include
+#              all mapped pages, can be much larger than the original. Anything
+#              trailing .data section (debug info) is cut off before padding.
+#   .pl     -- preamble suitable for patcher
+
+use warnings;
+use strict;
+use File::Slurp;
+use Data::Dumper;
+use JSON;
+use File::Basename;
+
+my $filepath = $ARGV[0] // "";
+die "usage: parse-le file.exe\n" unless -f $filepath;
+my ($filename) = fileparse($filepath);
+my $f = read_file $filepath, binmode => ":raw";
+
+my $mz = 0;
+my $le;
+while (1)
+{
+    $mz = index $f, "MZ", $mz;
+    die "no LE header found in $filename" if $mz < 0 or $mz + 0x40 > length($f);
+    $le = $mz + unpack("V", substr($f, $mz + 0x3C, 4));
+    last if (length($f) >= $le + 2) and substr($f, $le, 2) eq "LE";
+    $mz += 2;
+}
+
+my %h;
+(
+    $h{signature},
+    $h{byte_order},
+    $h{word_order},
+    $h{cpu},
+    $h{os},
+    $h{pages},
+    $h{initial_object_CS_number},
+    $h{initial_EIP},
+    $h{initial_object_SS_number},
+    $h{initial_ESP},
+    $h{memory_page_size},
+    $h{bytes_on_last_page},
+    $h{fixup_section_size},
+    $h{fixup_section_checksum},
+    $h{loader_section_size},
+    $h{loader_section_checksum},
+    $h{offset_of_object_table},
+    $h{object_table_entries},
+    $h{object_page_map_offset},
+    $h{object_iterate_data_map_offset},
+    $h{resource_table_offset},
+    $h{resource_table_entries},
+    $h{resident_names_table_offset},
+    $h{entry_table_offset},
+    $h{module_directive_table_offset},
+    $h{module_directive_entries},
+    $h{fixup_page_table_offset},
+    $h{fixup_record_table_offset},
+    $h{imported_modules_name_table_offset},
+    $h{inported_modules_count},
+    $h{imported_procedure_name_table_offset},
+    $h{per_page_checksum_table_offset},
+    $h{data_pages_offset_from_top_of_file},
+) = unpack("a2CCx4vvx8V*", substr($f, $le));
+write_file("$filename.le", { binmode => ":raw" }, substr($f, $le));
+write_file("$filename.mz", { binmode => ":raw" }, substr($f, $mz));
+
+sub parse_entries {
+    my ($start, $n, $parser) = @_;
+    my @res;
+    for (my $i = 0; $i < $n; ++$i) {
+        my ($r, $bytes_read) = $parser->($start, $i);
+        die "undef as result?" unless defined $r;
+        $start += $bytes_read;
+        push(@res, $r);
+    }
+    return \@res;
+}
+
+sub _bit {
+    my ($flags, $bit) = @_;
+    return $flags & (1 << $bit) ? 1 : 0;
+}
+
+sub decode_obj_flags {
+    my ($flags) = @_;
+    my %ff;
+    my %type = (
+        0 => "normal",
+        1 => "zero-filled",
+        2 => "resident",
+        3 => "resident/contigous",
+    );
+    $ff{readable}    = _bit $flags, 0;
+    $ff{writable}    = _bit $flags, 1;
+    $ff{executable}  = _bit $flags, 2;
+    $ff{resource}    = _bit $flags, 3;
+    $ff{discardable} = _bit $flags, 4;
+    $ff{shared}      = _bit $flags, 5;
+    $ff{preloaded}   = _bit $flags, 6;
+    $ff{invalid}     = _bit $flags, 7;
+    $ff{type} = $type{ ($flags >> 8) & 3 };
+    $ff{'resident/long_locable'}       = _bit $flags, 10;
+    $ff{'16:16_alias'}                 = _bit $flags, 12;
+    $ff{'1:BIG(USE32)'}                = _bit $flags, 13;
+    $ff{'1:Conforming'}                = _bit $flags, 14;
+    $ff{'Object_i/o_priviledge_level'} = _bit $flags, 15;
+    return \%ff;
+}
+
+sub parse_object_entry {
+    my ($start) = @_;
+    my %r;
+    (
+        $r{virtual_segment_size},
+        $r{relocation_base_address},
+        $r{object_flags},
+        $r{page_map_index},
+        $r{page_map_entries},
+    ) = unpack("V5", substr($f, $start, 24));
+    $r{object_flags_decoded} = decode_obj_flags($r{object_flags});
+    return (\%r, 24);
+}
+
+$h{object_table} = parse_entries(
+    $le + $h{offset_of_object_table},
+    $h{object_table_entries},
+    \&parse_object_entry
+);
+
+sub parse_page {
+    my ($start) = @_;
+    my %r;
+    (
+        $r{HighPag},    #
+        $r{low},
+        $r{flags},
+    ) = unpack("vCC", substr($f, $start, 8));
+    $r{off} = ($r{HighPag} + $r{low} - 1) * $h{memory_page_size} +
+        $h{data_pages_offset_from_top_of_file} + $mz;
+    return (\%r, 4);
+}
+
+$h{object_page_table} = parse_entries(
+    $le + $h{object_page_map_offset},
+    $h{pages},
+    \&parse_page
+);
+
+for my $obj (@{$h{object_table}}) {
+    $obj->{off} = $h{object_page_table}[$obj->{page_map_index} - 1]->{off};
+}
+
+sub parse_offset {
+    my ($start) = @_;
+    return (unpack("V", substr($f, $start, 4)), 4);
+}
+
+$h{fixup_page_table} = parse_entries(
+    $le + $h{fixup_page_table_offset},
+    $h{pages} + 1,
+    \&parse_offset
+);
+
+sub decode_fixup_flags {
+    my ($flags) = @_;
+    my %ff;
+    my %target = (
+        0 => "internal",
+        1 => "imported",
+        2 => "by-name",
+        3 => "internal-entry-table",
+    );
+    $ff{target} = $target{$flags & 3};
+    $ff{target_offset_32bit} = $flags & 0x10;
+    return \%ff;
+}
+
+sub tt {
+    return Data::Dumper->new([@_])->Indent(0)->Terse(1)->Sortkeys(1)
+            ->Dump;
+}
+
+sub parse_fixup_page {
+    my ($start, $n) = @_;
+    die
+        "bad start for fixup at $start: $h{fixup_page_table}[$n] + $h{fixup_record_table_offset} + $le"
+        unless $start ==
+        $h{fixup_page_table}[$n] + $h{fixup_record_table_offset} + $le;
+    die "table index out of range when parsing fixups: ind=$n tot=$h{pages}\n"
+        unless defined $h{fixup_page_table}[ $n + 1 ];
+    my $bytes_total = $h{fixup_page_table}[ $n + 1 ] - $h{fixup_page_table}[$n];
+    my $bytes       = $bytes_total;
+    my @r;
+    my $startmark;
+    my $unpack = sub {
+        my ($pattern) = @_;
+        my @v = unpack("x$start $pattern .", $f);
+        my ($stop) = splice(@v, -1, 1);
+        $bytes -= $stop - $start;
+        $start = $stop;
+        die sprintf("truncated fixup at 0x%x: unpack short %d bytes",
+                    $startmark, -$bytes) if $bytes < 0;
+        return (@v);
+    };
+    while ($bytes > 0) {
+        $startmark = $start;
+        my ($src, $flags, $srcoff) = $unpack->("CCv");
+        my $ff = {
+            _start => $startmark,
+            _s     => $src,
+            _f     => $flags,
+            src    => $srcoff,
+            obj    => ($unpack->(($flags & 0x40) ? "v" : "C")),
+        };
+
+        if ($src == 2) {
+            $ff->{selector} = 1;
+        } elsif ($src == 5) {
+            $ff->{dst} = $unpack->("v");
+            $ff->{dst_bits} = 16;
+            $ff->{width} = 2;
+        } else {
+            $ff->{width} = 4;
+            die "unsupported src $src"
+                unless $src == 7;    # 32 bit fixup
+            die "unsupported flags $flags"
+                unless $flags == 0
+                or $flags == 16;     # target is 16 / 32 bit
+            $ff->{_fd} = decode_fixup_flags($flags);
+            if ($ff->{_fd}{target_offset_32bit}) {
+                $ff->{dst} = $unpack->("V");
+                $ff->{dst_bits} = 32;
+            } else {
+                $ff->{dst} = $unpack->("v");
+                $ff->{dst_bits} = 16;
+            }
+            next if $ff->{src} < 0; # boundary reloc, accounted for by prev page
+        }
+        $ff->{src} = $h{object_page_table}[$n]{off} + $ff->{src};
+        my $obj = $h{object_table}[$ff->{obj} - 1];
+        die "obj index $ff->{obj} is outside of object table"
+            unless defined $obj;
+        $ff->{dst} = $ff->{dst} + $obj->{off} if exists $ff->{dst};
+        push(@r, $ff);
+    }
+    die "trailing data in fixups, $bytes bytes, page $n\n" if $bytes != 0;
+    return (\@r, $bytes_total);
+}
+
+$h{fixup_record_table} = parse_entries(
+    $le + $h{fixup_record_table_offset},
+    $h{pages},
+    \&parse_fixup_page
+);
+
+my $do_hide = 1;
+
+sub hide_private {
+    my ($k, $h) = @_;
+    if (ref($h) eq '') {
+        return $h unless defined $h;
+        return sprintf("0x%X", $h) if $h =~ /^[0-9]+$/ and $h > 9;
+        return $h;
+    }
+    if (ref($h) eq "ARRAY") {
+        my @res;
+        for my $e (@$h) {
+            push(@res, hide_private('', $e));
+        }
+        return \@res;
+    }
+    if (ref($h) eq "HASH") {
+        my %res;
+        for my $k2 (keys %$h) {
+            if ($do_hide) {
+                next if $k2 =~ /^_/;
+                next if $k2 eq 'fixup_page_table';
+                # next if $k2 eq 'fixup_record_table';
+            }
+            $res{$k2} = hide_private($k2, $h->{$k2});
+        }
+        return \%res;
+    }
+    die "unknown object type $h";
+}
+
+sub write_relocated_bin {
+    my $size = 0;
+    my $vsize = 0;
+    for my $o (@{$h{object_table}}) {
+        my $s = $o->{off} + $o->{page_map_entries} * $h{memory_page_size};
+        $size = $s if $s > $size;
+        my $v = $o->{off} + $o->{virtual_segment_size};
+        $vsize = $v if $v > $vsize;
+    }
+    my $f2 = substr($f, 0, $size) . ("\0" x ($vsize - $size));
+    for my $rb (@{$h{fixup_record_table}}) {
+        for my $r (@$rb) {
+            next unless exists $r->{dst}; # spooky selector stuff
+            my $s = $r->{src};
+            my $d = $r->{dst};
+            die "source offset out of range $s" if $s + 4 > length $f2;
+            die "dest offset out of range $d" if $d + 4 > length $f2;
+            substr($f2, $s, 4, pack("V", $d));
+        }
+    }
+    write_file("$filename.bin", { binmode => ":raw" }, $f2);
+}
+
+sub write_patcher_config {
+    (print "warning: unable to generate patcher config"), return
+        unless @{$h{object_table}} >= 2;
+    my $boot = "";
+    my $npage = 0;
+    foreach my $rb (@{$h{fixup_record_table}}) {
+        foreach my $r (@$rb) {
+            if ($r->{width} eq 4 and $r->{obj} == 2) {
+                $boot = sprintf "
+    data_bootstrap_ptr => 0x%X, # pointer in .text
+    data_bootstrap_var => 0x%X, # variable in .data
+",
+                    $r->{src} - $h{object_table}[0]{off},
+                    $r->{dst} - $h{object_table}[1]{off};
+                goto found;
+            }
+        }
+        $npage++;
+        last if $npage >= $h{object_table}[0]{page_map_entries};
+    }
+    print "warning: no suitable fixup for bootstrap variable\n";
+found:
+
+    write_file "$filename.pl", sprintf
+'use Patcher;
+
+Patcher::modify_context(%s
+    "section_offset .text" => 0x%X,
+    "section_offset .data" => 0x%X,
+
+    "section_length .text" => 0x%X,
+    "section_length .data" => 0x%X,
+
+    "section_base .text" => 0x%X,
+    "section_base .data" => 0x%X,
+
+    "section_pspace_offset .text" => 0x%X,
+    "section_pspace_length .text" => %d,
+
+    "section_source .text" => "exe",
+    "section_source .data" => "exe",
+
+    default_source => "exe",
+    "source_input_file exe" => "%s",
+    "source_output_file exe" => "%s.patched",
+);
+',  $boot,
+    (map { $h{object_table}[$_]{off} } 0..1),
+    (map {
+        my $m = $h{memory_page_size};
+        int (($h{object_table}[$_]{virtual_segment_size} + $m - 1) / $m) * $m;
+    } 0..1),
+    (map { $h{object_table}[$_]{relocation_base_address} } 0..1),
+    $h{object_table}[0]{virtual_segment_size},
+    $h{object_table}[0]{page_map_entries} * $h{memory_page_size}
+                                    - $h{object_table}[0]{virtual_segment_size},
+    $filepath, $filename
+    ;
+}
+
+write_file("$filename.json",
+           JSON->new->pretty->canonical->encode(hide_private('', \%h)));
+write_relocated_bin;
+write_patcher_config;
