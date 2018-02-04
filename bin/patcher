@@ -73,7 +73,7 @@ if (@renames) {
         ".data" => -517780,
     );
     my $offs = $Patcher::ctx->{symbol_offset};
-    for my $sym (sort { $offs->{$a} <=> $offs->{$b} } keys $offs) {
+    for my $sym (sort { $offs->{$a} <=> $offs->{$b} } keys %$offs) {
         my $sec = $Patcher::ctx->{symbol_section}{$sym};
         my $off = $offs->{$sym} + $adjust{$sec};
         printf $fh "MakeName(0x%x, '%s_%x');\n", $off, $sym, $off
