@@ -98,6 +98,7 @@ sub load_config {
 
         do $c;
         die if $@;
+        die "unable to read $c: $@" if $!;
     }
 }
 
