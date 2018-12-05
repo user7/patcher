@@ -12,13 +12,17 @@
 use FindBin;
 use lib "$FindBin::Bin/../lib";
 use Patcher qw/ load_config modify_context patch /;
+use Getopt::Long;
+
+my $bytes;
+GetOptions("b|bytes!" => \$bytes) or die "d [ -bytes ] <source";
 
 modify_context("settings truncate_long_dumps"      => undef);
 modify_context("settings off_name_enclosing_scope" => 1);
 modify_context("settings need_listing" => 1);
 modify_context("settings need_objdump" => 1);
 
-my $p = join("\n", (<>));
+my $p = join("\n", (<STDIN>));
 if ($p !~ /^#/) {
     $p =~ s/\s//sg;
     die "non-hex symbol in hex patch"
@@ -31,8 +35,12 @@ if ($p !~ /^#/) {
 }
 
 my $c = Patcher::build_chunk($p);
-my @l = grep { /^\s*[0-9a-f]+:/ } split(/\n/, $c->{listing});
-for my $l (@l) {
-    print "$l\n";
-    # TODO: resolve calls
+if ($bytes) {
+    print $c->{bytes};
+} else {
+    my @l = grep { /^\s*[0-9a-f]+:/ } split(/\n/, $c->{listing});
+    for my $l (@l) {
+        print "$l\n";
+        # TODO: resolve calls
+    }
 }
