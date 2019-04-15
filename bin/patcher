@@ -5,6 +5,7 @@ use lib "$FindBin::Bin/../lib";
 use Patcher;
 use Getopt::Long;
 use File::Slurp;
+use JSON;
 
 my @a;
 GetOptions(
