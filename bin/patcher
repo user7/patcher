@@ -7,47 +7,41 @@ use Getopt::Long;
 use File::Slurp;
 use JSON;
 
-my @a;
-GetOptions(
-    "define|d=s" => sub {
-        my ($opt, $set) = @_;
-        die "you must specify key=value for $opt"
-            unless $set =~ /^([^=]*)=(.*)/;
-        push(@a, [ def => $1, $2 ]);
-    },
-    "<>" => sub {
-        push(@a, [ load => $_[0] ]);
-    },
-) or die "bad commad line arguments";
-
 eval {
+    my @a;
+    GetOptions(
+        "define|d=s" => sub {
+            my ($opt, $set) = @_;
+            Patcher::_die "you must specify key=value for $opt"
+                unless $set =~ /^([^=]*)=(.*)/;
+            my ($key, $val) = ($1, $2);
+            $val = eval $val if $val =~ /[][{}]/;
+            push(@a, [ def => $key, $val ]);
+        },
+        "<>" => sub {
+            push(@a, [ load => $_[0] ]);
+        },
+    ) or Patcher::_die "bad commad line arguments";
+
     for my $a (@a) {
         if ($a->[0] eq 'def') {
-            shift @$a;
-            Patcher::modify_context(@$a);
+            Patcher::modify_context(@{$a->[1..2]});
             next;
         }
         if ($a->[0] eq 'load') {
-            shift @$a;
-            Patcher::load_config(@$a);
+            Patcher::load_config($a->[1]);
             next;
         }
         Patcher::_die "unknown action type '$a->[0]'";
     }
 };
 
-sub any_key {
-    my $err = shift;
-    if ($^O =~ /Win/) {
-        print "$err\n" if $err;
-        print "press any key to continue..\n";
-        getc;
-    }
-}
-
 if ($@) {
     $| = 1;
-    any_key($@);
-    die $@;
+    print "$@\n";
 }
-any_key();
+if ($^O =~ /Win/) {
+    print "press enter to continue..\n";
+    getc;
+}
+exit 1 if $@;
