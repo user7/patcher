@@ -85,8 +85,8 @@ sub modify_context {
     while (@_) {
         my ($k, $v) = (shift, shift);
         my $t = $ctx;
-        $k = [ split /\s+/, $k ]
-            if $k =~ /\s/;
+        $k = [ split m![/\s]+!, $k ]
+            if $k =~ m![/\s]!;
         if (ref($k) eq "ARRAY") {
             $t = $t->{ shift @$k } //= {} while @$k > 1;
             $k = shift @$k;
