@@ -1427,36 +1427,18 @@ sub gcc {
 
     my $out;
     my $tmpf = File::Temp->new(TEMPLATE => "bp-gcc-XXXXX");
-
-    # Since patcher doesn't support PLT and GOT relocations, here we pass
-    # -fno-pic and -fno-plt to gcc. On the other hand some older versions of gcc
-    # don't know (and don't need) -fno-plt switch, so if it's unrecognized we
-    # retry building without it.
-    my @noplt = "-fno-plt";
-RETRY:
-    @noplt = () if $ctx->{settings}{forbid_no_plt};
-    unless (
-        IPC::Run::run [
-            qw/ gcc -xc -m32 -fno-asynchronous-unwind-tables -march=i386
-                -ffreestanding -fno-pic /,
-            @noplt,
-            @{ $opts->{build_opts} // [] },
-            "-c",
-            (defined $code ? ("-") : ()),
-            "-o",
-            $tmpf,
+    IPC::Run::run [
+        qw/ gcc -xc -m32 -fno-asynchronous-unwind-tables -march=i386
+            -ffreestanding -fno-pic /,
+        @{ $opts->{build_opts} // [] },
+        @{ $ctx->{settings}{gcc_extra_opts} // [] },
+        "-c",
+        (defined $code ? ("-") : ()),
+        "-o",
+        $tmpf,
         ],
         (defined $code ? ("<", \$code) : ()), "&>", \$out
-    )
-    {
-        if (not defined $ctx->{settings}{forbid_no_plt}
-            and $out =~ /unrecognized command line option .*-fno-plt/m)
-        {
-            $ctx->{settings}{forbid_no_plt} = 1;
-            goto RETRY;
-        }
-        _croak_source("when compiling:", $code // "", $out);
-    }
+        or _croak_source("when compiling:", $code // "", $out);
 
     return _objdump($tmpf, $opts);
 }
@@ -1477,6 +1459,7 @@ sub clang {
     IPC::Run::run [
         qw/ clang -xc -m32 -march=i386 -ffreestanding /,
         @{ $opts->{build_opts} // [] },
+        @{ $ctx->{settings}{clang_extra_opts} // [] },
         "-c",
         (defined $code ? ("-") : ()),
         "-o",
@@ -1505,10 +1488,12 @@ sub gas {
 
     my $out;
     my $tmpf = File::Temp->new(TEMPLATE => "bp-as-XXXXX");
-    my @build_opts;
-    @build_opts = @{ $opts->{build_opts} }
-        if ref($opts->{build_opts});
-    IPC::Run::run [ qw/ as --32 -march=i386 /, @build_opts, "-o", $tmpf ],
+    IPC::Run::run [
+        qw/ as --32 -march=i386 /,
+        @{ $opts->{build_opts} // [] },
+        @{ $ctx->{settings}{gas_extra_opts} // [] },
+        "-o", $tmpf,
+        ],
         "<", \$code, "&>", \$out
         or _croak_source("when assembling:", $code, $out);
 
