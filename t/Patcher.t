@@ -163,7 +163,7 @@ eval_test(
 eval_test(
     "gas option",
     sub {
-        _unpack_deep Patcher::gas("", { build_opts => "-gstabs" });
+        _unpack_deep Patcher::gas("", { build_opts => ["-gstabs"] });
     },
     compare => {
         %$obj_common, bytes => "",
