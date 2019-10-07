@@ -25,7 +25,7 @@ eval {
 
     for my $a (@a) {
         if ($a->[0] eq 'def') {
-            Patcher::modify_context(@{$a->[1..2]});
+            Patcher::modify_context(@$a[1..2]);
             next;
         }
         if ($a->[0] eq 'load') {
