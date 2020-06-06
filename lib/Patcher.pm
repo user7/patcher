@@ -1554,8 +1554,8 @@ sub _build_chunk {
     return $node
         if defined $node->{bytes};
 
-    _die "no bytes and bad source: ", tt($node->{source})
-        unless defined $node->{source} and ref($node->{source}) eq "";
+    _die "no bytes and source is not a string: ", tt($node->{source})
+        if defined $node->{source} and ref($node->{source}) ne "";
 
     _die "bad format field: ", tt($node->{format})
         unless defined $node->{format} and ref($node->{format}) eq "";
