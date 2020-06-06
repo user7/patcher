@@ -7,6 +7,7 @@ use Data::Dumper;
 use File::Temp;
 use File::Slurp;
 use IPC::Run;
+use Digest::MD5;
 use Storable qw(freeze thaw);
 
 # perl export magic
